@@ -28,7 +28,7 @@ Run the server:
 go run ./cmd/stavewell
 ```
 
-The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable. It provides `GET /health` and `GET /version`, which need no API key, and the ledger endpoints described under [Ledgers](#ledgers).
+The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable. It provides `GET /health` and `GET /version`, which need no API key, and the ledger and record endpoints described under [Ledgers](#ledgers) and [Records](#records).
 
 The server keeps its data in an SQLite database file, `stavewell.db` in the current directory. To use a different file, set the `STAVEWELL_DB` environment variable. If the file doesn't exist, the server creates it, readable and writable only by your user account. SQLite also keeps two working files beside it, ending in `-wal` and `-shm`. When the server starts, it updates the database's structure to the version it needs, and it won't start if the database was created by a newer version of Stavewell.
 
@@ -123,7 +123,7 @@ curl -X POST http://127.0.0.1:8080/v1/ledgers \
 ```
 
 ```json
-{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}
+{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}
 ```
 
 A ledger name is 1 to 64 lowercase letters, digits and hyphens, starting with a letter. It's unique within your organization and never changes. An organization can have up to 100 ledgers.
@@ -136,7 +136,7 @@ curl http://127.0.0.1:8080/v1/ledgers \
 ```
 
 ```json
-{"ledgers":[{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}],"next_cursor":"eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfZ2MyZG1sbWZleTM0Nmt3aWU1Z2U1cmI2emkiLCJhIjoib3JkZXJzIn0","has_more":false}
+{"ledgers":[{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}],"next_cursor":"eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfdXVraW10bXlteGpodDdoM2Rib3pmdmltNHoiLCJhIjoib3JkZXJzIn0","has_more":false}
 ```
 
 ```bash
@@ -145,13 +145,92 @@ curl http://127.0.0.1:8080/v1/ledgers/orders \
 ```
 
 ```json
-{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}
+{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}
 ```
+
+`latest_sequence` and `latest_hash` are the sequence number and record hash of the ledger's latest record. Both are `null` until you append a record.
 
 The list returns up to 100 ledgers, or fewer if you set `limit`. To get the next page, pass `next_cursor` as the `cursor` parameter. A request without a valid key gets a `401` error:
 
 ```json
-{"type":"https://docs.stavewell.io/errors/unauthorized","title":"Unauthorized","status":401,"detail":"This request needs a valid API key in the Authorization header.","request_id":"req_kjq2rgm2dekgl2nrp4hk6phihq"}
+{"type":"https://docs.stavewell.io/errors/unauthorized","title":"Unauthorized","status":401,"detail":"This request needs a valid API key in the Authorization header.","request_id":"req_tioxsvihwhufjmkfntqgxmzzdw"}
+```
+
+## Records
+
+A record is one item appended to a ledger. A record never changes after it's written, and it can't be deleted.
+
+Append a record. It needs the `ledger:write` scope. The request body has one field, `data`, which is a JSON object:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/ledgers/orders/records \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"order_id":"A-1001","amount":"12.50","quantity":2}}'
+```
+
+```json
+{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"}
+```
+
+Stavewell sets the other fields:
+
+- `ledger`: the ledger's name.
+- `sequence`: records in a ledger are numbered from 1, in the order they're appended, with no gaps.
+- `created_at`: when the record was appended, in UTC. It's never earlier than the previous record's `created_at`.
+- `data`: your data as canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)): keys sorted and no whitespace. Your key order and spacing aren't kept.
+- `data_hash`: the SHA-256 hash of `data`.
+- `previous_hash`: the record hash of the previous record, or 64 zeros for record 1.
+- `hash`: the record hash. It covers `created_at`, `data_hash`, `ledger`, `previous_hash` and `sequence`. Because each record hash covers the previous one, the record hashes form the ledger's chain.
+
+The "Record hashes" section of `api/openapi.yaml` gives the exact rules, with a worked example, so you can compute the hashes yourself.
+
+Numbers in `data` must be whole numbers from -9007199254740991 to 9007199254740991, with no decimal point or exponent. Send other numbers, such as amounts, as strings. A decimal number gets an error:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/ledgers/orders/records \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey" \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"order_id":"A-1003","amount":12.50,"quantity":1}}'
+```
+
+```json
+{"type":"https://docs.stavewell.io/errors/invalid-record-data","title":"Invalid record data","status":400,"detail":"Numbers in data must be whole numbers from -9007199254740991 to 9007199254740991, written without a decimal point or exponent. Send other numbers as strings.","request_id":"req_rlhwf6t6vd7jmtouiw36bsxz6c"}
+```
+
+`data` can be up to 16 KiB in canonical form, nested up to 32 levels deep. The "Record data" section of `api/openapi.yaml` lists every rule.
+
+After a second record is appended, list the ledger's records, or get one by its sequence number. Both need the `ledger:read` scope:
+
+```bash
+curl http://127.0.0.1:8080/v1/ledgers/orders/records \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey"
+```
+
+```json
+{"records":[{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"},{"ledger":"orders","sequence":2,"created_at":"2026-11-06T22:57:50.215Z","data":{"amount":"7.25","order_id":"A-1002","quantity":1},"data_hash":"86658e9cc2039fe716129d5f2f34d78d29d0efbaa929f07c8e7569e08c4f9fe5","previous_hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad","hash":"7979f94e80f8566795a6e3143c030fc752b4c309b42caaa0dfca87b495053a60"}],"next_cursor":"eyJ2IjoxLCJsIjoicmVjb3Jkcy9vcmRlcnMiLCJvIjoib3JnX3V1a2ltdG15bXhqaHQ3aDNkYm96ZnZpbTR6IiwiYSI6IjIifQ","has_more":false}
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/ledgers/orders/records/1 \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey"
+```
+
+```json
+{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"}
+```
+
+The list returns records in sequence order, up to 100 at a time, or fewer if you set `limit`. Pages work as they do for ledgers, and `next_cursor` is present even on the last page. To follow a ledger, keep the last page's `next_cursor` and use it later: you get only the records appended since.
+
+The ledger now reports its latest record:
+
+```bash
+curl http://127.0.0.1:8080/v1/ledgers/orders \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey"
+```
+
+```json
+{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":2,"latest_hash":"7979f94e80f8566795a6e3143c030fc752b4c309b42caaa0dfca87b495053a60"}
 ```
 
 `api/openapi.yaml` describes every endpoint, parameter and error.

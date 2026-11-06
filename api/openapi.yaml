@@ -56,6 +56,59 @@ info:
     using it later returns only items added since. Cursors don't expire, and
     a cursor works only with the list it came from. Don't parse or build
     cursors: their contents can change.
+
+    ## Record data
+
+    A record's `data` is a JSON object that follows these rules. Data that
+    breaks one gets an `invalid-record-data` error (400), and the error's
+    `detail` names the rule.
+
+    - Numbers are whole numbers from -9007199254740991 to 9007199254740991,
+      written without a decimal point or exponent. Send other numbers as
+      strings, for example `"amount": "12.50"`.
+    - An object doesn't have the same key twice.
+    - Strings are valid UTF-8, with no unpaired surrogate escapes such as
+      `\ud800`.
+    - `data` is nested at most 32 levels deep, counting `data` itself as
+      level 1.
+
+    Stavewell stores and returns `data` as canonical JSON (RFC 8785): keys
+    sorted, no whitespace, and each string written the same way every time.
+    So your key order and spacing aren't kept, and `-0` becomes `0`. The
+    canonical form of `data` can be up to 16 KiB (16,384 bytes); larger data
+    gets a `record-too-large` error (413).
+
+    ## Record hashes
+
+    Each record has two hashes. Both are SHA-256 hashes of canonical JSON, in
+    UTF-8, written as 64 lowercase hexadecimal characters.
+
+    - `data_hash` is the hash of `data`.
+    - `hash`, the record hash, is the hash of an object with exactly these
+      five fields from the record: `created_at`, `data_hash`, `ledger`,
+      `previous_hash` and `sequence`.
+
+    A record's `previous_hash` is the record hash of the record before it.
+    For record 1, it's 64 zeros. So each record hash depends on every record
+    before it, and the record hashes form the ledger's chain.
+
+    For example, take record 1 of the ledger `orders`, created at
+    `2026-11-06T19:22:31.123Z`, with this `data`:
+
+    ```
+    {"amount":"12.50","order_id":"A-1001","quantity":2}
+    ```
+
+    Its `data_hash` is the SHA-256 hash of that text:
+    `c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c`. Its
+    record hash is the SHA-256 hash of this text:
+
+    ```
+    {"created_at":"2026-11-06T19:22:31.123Z","data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","ledger":"orders","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","sequence":1}
+    ```
+
+    which is
+    `7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a`.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
@@ -66,6 +119,10 @@ tags:
     description: |
       Ledgers in your organization. A ledger is a named, append-only sequence
       of records.
+  - name: Records
+    description: |
+      Records in your organization's ledgers. A record never changes after
+      it's written.
 paths:
   /health:
     get:
@@ -139,6 +196,8 @@ paths:
               example:
                 name: orders
                 created_at: "2026-11-06T19:22:31.123Z"
+                latest_sequence: null
+                latest_hash: null
         "400":
           description: |
             The request body isn't a JSON object with only the `name` field,
@@ -188,6 +247,8 @@ paths:
                 ledgers:
                   - name: orders
                     created_at: "2026-11-06T19:22:31.123Z"
+                    latest_sequence: 2
+                    latest_hash: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
                 next_cursor: eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfZ2MyZG1sbWZleTM0Nmt3aWU1Z2U1cmI2emkiLCJhIjoib3JkZXJzIn0
                 has_more: false
         "400":
@@ -207,17 +268,14 @@ paths:
           $ref: "#/components/responses/InternalError"
   /v1/ledgers/{name}:
     parameters:
-      - name: name
-        in: path
-        required: true
-        description: The ledger's name.
-        schema:
-          $ref: "#/components/schemas/LedgerName"
+      - $ref: "#/components/parameters/LedgerNamePath"
     get:
       operationId: getLedger
       tags: [Ledgers]
       summary: Get a ledger
-      description: Returns one of your organization's ledgers.
+      description: |
+        Returns one of your organization's ledgers, including the sequence
+        number and record hash of its latest record.
       security:
         - apiKey: [ledger:read]
       responses:
@@ -230,6 +288,8 @@ paths:
               example:
                 name: orders
                 created_at: "2026-11-06T19:22:31.123Z"
+                latest_sequence: 2
+                latest_hash: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -245,6 +305,216 @@ paths:
                 $ref: "#/components/schemas/Problem"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/ledgers/{name}/records:
+    parameters:
+      - $ref: "#/components/parameters/LedgerNamePath"
+    post:
+      operationId: appendRecord
+      tags: [Records]
+      summary: Append a record
+      description: |
+        Appends a record to one of your organization's ledgers. Stavewell sets
+        the record's sequence number, creation time and hashes. A record never
+        changes after it's written, and can't be deleted.
+
+        Records in a ledger are numbered from 1, in the order they're
+        appended, with no gaps. A failed request doesn't use a number. A
+        record's `created_at` is never earlier than the previous record's.
+      security:
+        - apiKey: [ledger:write]
+      requestBody:
+        required: true
+        description: |
+          A JSON object with only the `data` field, up to 64 KiB. See "Request
+          bodies" and "Record data" in the API description.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendRecordRequest"
+            example:
+              data:
+                order_id: A-1001
+                amount: "12.50"
+                quantity: 2
+      responses:
+        "201":
+          description: The record was appended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
+              example:
+                ledger: orders
+                sequence: 1
+                created_at: "2026-11-06T19:22:31.123Z"
+                data:
+                  amount: "12.50"
+                  order_id: A-1001
+                  quantity: 2
+                data_hash: c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c
+                previous_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                hash: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+        "400":
+          description: |
+            The request body isn't a JSON object with only the `data` field
+            (`invalid-request`), or `data` breaks one of the rules in "Record
+            data" (`invalid-record-data`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: |
+            Your organization has no ledger with this name. The error type is
+            `ledger-not-found`. A ledger in another organization gets the same
+            error.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413":
+          description: |
+            The request body is larger than 64 KiB (`request-too-large`), or
+            the canonical form of `data` is larger than 16 KiB
+            (`record-too-large`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listRecords
+      tags: [Records]
+      summary: List records
+      description: |
+        Lists a ledger's records, a page at a time, in sequence order. To
+        follow a ledger as records are appended, keep the last page's
+        `next_cursor` and use it later.
+      security:
+        - apiKey: [ledger:read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordList"
+              example:
+                records:
+                  - ledger: orders
+                    sequence: 1
+                    created_at: "2026-11-06T19:22:31.123Z"
+                    data:
+                      amount: "12.50"
+                      order_id: A-1001
+                      quantity: 2
+                    data_hash: c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c
+                    previous_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                    hash: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+                  - ledger: orders
+                    sequence: 2
+                    created_at: "2026-11-06T19:22:32.456Z"
+                    data:
+                      amount: "7.25"
+                      order_id: A-1002
+                      quantity: 1
+                    data_hash: 86658e9cc2039fe716129d5f2f34d78d29d0efbaa929f07c8e7569e08c4f9fe5
+                    previous_hash: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+                    hash: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
+                next_cursor: eyJ2IjoxLCJsIjoicmVjb3Jkcy9vcmRlcnMiLCJvIjoib3JnX2djMmRtbG1mZXkzNDZrd2llNWdlNXJiNnppIiwiYSI6IjIifQ
+                has_more: false
+        "400":
+          description: |
+            The `limit` parameter isn't a whole number from 1 to 100
+            (`invalid-request`), or the cursor didn't come from this ledger's
+            list of records (`invalid-cursor`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: |
+            Your organization has no ledger with this name. The error type is
+            `ledger-not-found`. A ledger in another organization gets the same
+            error.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ledgers/{name}/records/{sequence}:
+    parameters:
+      - $ref: "#/components/parameters/LedgerNamePath"
+      - name: sequence
+        in: path
+        required: true
+        description: The record's sequence number.
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+    get:
+      operationId: getRecord
+      tags: [Records]
+      summary: Get a record
+      description: Returns one record from one of your organization's ledgers.
+      security:
+        - apiKey: [ledger:read]
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
+              example:
+                ledger: orders
+                sequence: 1
+                created_at: "2026-11-06T19:22:31.123Z"
+                data:
+                  amount: "12.50"
+                  order_id: A-1001
+                  quantity: 2
+                data_hash: c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c
+                previous_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                hash: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+        "400":
+          description: |
+            The sequence number isn't a whole number from 1 up. The error type
+            is `invalid-request`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: |
+            Your organization has no ledger with this name
+            (`ledger-not-found`), or the ledger has no record with this
+            sequence number (`record-not-found`). A ledger in another
+            organization gets the same error as a missing one.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     apiKey:
@@ -254,6 +524,13 @@ components:
         An API key, for example
         `sw_exampleexampleexampleexampleexampleexampleexamplekey`.
   parameters:
+    LedgerNamePath:
+      name: name
+      in: path
+      required: true
+      description: The ledger's name.
+      schema:
+        $ref: "#/components/schemas/LedgerName"
     Limit:
       name: limit
       in: query
@@ -387,7 +664,7 @@ components:
     Ledger:
       type: object
       additionalProperties: false
-      required: [name, created_at]
+      required: [name, created_at, latest_sequence, latest_hash]
       properties:
         name:
           x-order: 1
@@ -400,6 +677,24 @@ components:
           description: |
             When the ledger was created, in UTC with three fractional digits.
           examples: ["2026-11-06T19:22:31.123Z"]
+        latest_sequence:
+          x-order: 3
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+          description: |
+            The sequence number of the ledger's latest record, which is also
+            the number of records in the ledger. It's `null` if the ledger has
+            no records.
+          examples: [2]
+        latest_hash:
+          x-order: 4
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            The record hash of the ledger's latest record. It's `null` if the
+            ledger has no records.
+          examples: [1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce]
     LedgerList:
       type: object
       additionalProperties: false
@@ -422,6 +717,91 @@ components:
           type: boolean
           description: |
             Whether more ledgers existed after this page when the request ran.
+    Hash:
+      type: string
+      description: A SHA-256 hash, written as 64 lowercase hexadecimal characters.
+      pattern: "^[0-9a-f]{64}$"
+      examples: [7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a]
+    AppendRecordRequest:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          x-go-type: json.RawMessage
+          description: |
+            The record's content. It must follow the rules in "Record data"
+            in the API description.
+    Record:
+      type: object
+      additionalProperties: false
+      required: [ledger, sequence, created_at, data, data_hash, previous_hash, hash]
+      properties:
+        ledger:
+          x-order: 1
+          $ref: "#/components/schemas/LedgerName"
+        sequence:
+          x-order: 2
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            The record's sequence number. Records in a ledger are numbered
+            from 1, in the order they were appended, with no gaps.
+          examples: [1]
+        created_at:
+          x-order: 3
+          type: string
+          format: date-time
+          x-go-type: string
+          description: |
+            When the record was appended, in UTC with three fractional digits.
+            It's never earlier than the previous record's `created_at`.
+          examples: ["2026-11-06T19:22:31.123Z"]
+        data:
+          x-order: 4
+          type: object
+          x-go-type: json.RawMessage
+          description: |
+            The record's content, as canonical JSON. See "Record data" in the
+            API description.
+        data_hash:
+          x-order: 5
+          $ref: "#/components/schemas/Hash"
+          description: The SHA-256 hash of the canonical JSON of `data`.
+        previous_hash:
+          x-order: 6
+          $ref: "#/components/schemas/Hash"
+          description: |
+            The record hash of the previous record, or 64 zeros for record 1.
+        hash:
+          x-order: 7
+          $ref: "#/components/schemas/Hash"
+          description: |
+            The record hash. See "Record hashes" in the API description.
+    RecordList:
+      type: object
+      additionalProperties: false
+      required: [records, next_cursor, has_more]
+      properties:
+        records:
+          x-order: 1
+          type: array
+          description: A page of records, in sequence order.
+          items:
+            $ref: "#/components/schemas/Record"
+        next_cursor:
+          x-order: 2
+          type: string
+          description: |
+            Pass this as `cursor` to get the next page. It's present even on
+            the last page.
+        has_more:
+          x-order: 3
+          type: boolean
+          description: |
+            Whether more records existed after this page when the request ran.
     Health:
       type: object
       additionalProperties: false

@@ -2,9 +2,9 @@
 // endpoints return as next_cursor.
 //
 // A cursor holds only values the caller already knows: which list it belongs
-// to, the organization's public ID and the last item returned. It never holds
-// internal row numbers, which would reveal how many organizations or ledgers
-// exist. Cursors aren't signed: a caller who edits one can only point it at a
+// to, the organization's public ID and the last item returned (a ledger's
+// name, or a record's sequence number). It never holds internal row numbers,
+// which would reveal how many organizations or ledgers exist. Cursors aren't signed: a caller who edits one can only point it at a
 // position in their own organization's list, which they could reach anyway,
 // because the server takes the organization from the API key and checks the
 // cursor against it.
@@ -24,10 +24,14 @@ const version = 1
 // maxLen is the longest cursor accepted, which is well over any real one.
 const maxLen = 512
 
-// The lists a cursor can belong to.
-const (
-	ListLedgers = "ledgers"
-)
+// ListLedgers is the list of an organization's ledgers.
+const ListLedgers = "ledgers"
+
+// ListRecords returns the list of the records in the ledger with the name.
+// A cursor from one ledger's records doesn't work for another ledger's.
+func ListRecords(ledger string) string {
+	return "records/" + ledger
+}
 
 // ErrInvalid means a cursor is malformed, or belongs to a different list or
 // organization.
@@ -35,7 +39,7 @@ var ErrInvalid = errors.New("invalid cursor")
 
 // Position is where a page of a list starts.
 type Position struct {
-	List           string // which list, for example ListLedgers
+	List           string // which list, for example ListLedgers or ListRecords("orders")
 	OrganizationID string // the organization's public ID
 	After          string // the last item already returned; empty for the start
 }
