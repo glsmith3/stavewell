@@ -6,7 +6,7 @@ Stavewell is a developer platform for append-only records with tamper-evident ha
 
 ## Status
 
-In development. The server currently provides health and version endpoints only. Not open for sign-ups.
+In development. Not open for sign-ups.
 
 ## Documentation
 
@@ -28,7 +28,7 @@ Run the server:
 go run ./cmd/stavewell
 ```
 
-The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable.
+The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable. It currently provides two endpoints: `GET /health` and `GET /version`.
 
 Check that it's running:
 

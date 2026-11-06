@@ -7,8 +7,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,23 +23,46 @@ import (
 // server through a tunnel, never through an open port.
 const defaultAddr = "127.0.0.1:8080"
 
+// shutdownTimeout is how long in-flight requests get to finish after a
+// shutdown signal.
+const shutdownTimeout = 10 * time.Second
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(logger); err != nil {
-		logger.Error("server stopped", "error", err)
-		os.Exit(1)
-	}
-}
 
-func run(logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// After the first signal, restore default signal handling, so a second
+	// signal stops the process immediately instead of waiting for shutdown.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
 	addr := os.Getenv("STAVEWELL_ADDR")
 	if addr == "" {
 		addr = defaultAddr
 	}
 
+	if err := run(ctx, logger, addr); err != nil {
+		logger.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+// run serves the API on addr until ctx is canceled, then shuts down
+// gracefully. It returns an error if the address can't be bound or the
+// server fails.
+func run(ctx context.Context, logger *slog.Logger, addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.Handler(logger),
+		Handler: server.Handler(logger),
+		// Route net/http's own messages through the structured logger.
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -47,26 +70,25 @@ func run(logger *slog.Logger) error {
 		MaxHeaderBytes:    16 << 10, // 16 KiB
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	logger.Info("listening",
+		"addr", ln.Addr().String(),
+		"version", buildinfo.Version,
+		"commit", buildinfo.Commit(),
+	)
 
 	errs := make(chan error, 1)
-	go func() {
-		logger.Info("listening", "addr", addr, "version", buildinfo.Version, "commit", buildinfo.Commit())
-		errs <- srv.ListenAndServe()
-	}()
+	go func() { errs <- srv.Serve(ln) }()
 
 	select {
 	case err := <-errs:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
+		// Serve returns only on failure here, because Shutdown hasn't been
+		// called yet.
 		return err
 	case <-ctx.Done():
 	}
 
 	logger.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
 }

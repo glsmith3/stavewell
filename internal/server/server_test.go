@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -45,8 +47,10 @@ func TestSpecIsValid(t *testing.T) {
 	}
 }
 
-// TestResponsesMatchSpec checks every endpoint's real response against the
-// schema in api/openapi.yaml.
+// TestResponsesMatchSpec calls every operation in api/openapi.yaml and checks
+// the real response against the spec. Operations it can't call automatically
+// (anything other than a GET without parameters) fail the test, so a new
+// operation can't go unchecked: give it its own test case instead.
 func TestResponsesMatchSpec(t *testing.T) {
 	ctx := context.Background()
 	doc := loadSpec(t)
@@ -56,7 +60,17 @@ func TestResponsesMatchSpec(t *testing.T) {
 	}
 	srv := newTestServer(t)
 
-	for _, path := range []string{"/health", "/version"} {
+	paths := doc.Paths.Map()
+	for _, path := range slices.Sorted(maps.Keys(paths)) {
+		item := paths[path]
+		for method, op := range item.Operations() {
+			if method != http.MethodGet || len(op.Parameters) > 0 || len(item.Parameters) > 0 {
+				t.Errorf("%s %s can't be checked automatically; add a test case for it", method, path)
+			}
+		}
+		if item.Get == nil {
+			continue
+		}
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(srv.URL + path)
 			if err != nil {

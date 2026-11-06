@@ -23,7 +23,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # The latest 1.27 patch release, so CI picks up Go security fixes
+          # without waiting for go.mod to change. Update this and go.mod when
+          # moving to a new Go minor version.
+          go-version: "1.27.x"
+          check-latest: true
 
       - name: Verify modules
         run: go mod verify

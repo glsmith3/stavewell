@@ -3,7 +3,8 @@ info:
   title: Stavewell API
   version: 0.1.0-dev
   description: |
-    The Stavewell HTTP API. All requests and responses use JSON.
+    The Stavewell HTTP API. Successful responses use JSON. Error responses
+    are currently plain text.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
