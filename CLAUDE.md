@@ -21,7 +21,7 @@ Use these terms exactly, in docs, code and UI:
 - **Cursor:** An opaque position used to page through records.
 - **Retention period:** How long records are kept before removal.
 
-Don't use: "entry" (say "record"), crypto vocabulary ("block," "blockchain," "mining"), "transaction," "customer," or "stave" as a technical term.
+Don't use: "entry" (say "record"), crypto vocabulary ("block," "blockchain," "mining"), "transaction," "customer," or "stave" as a technical term. One exception: code comments may say "transaction" when they mean a database transaction. Docs, the API and the UI never use it.
 
 ## Rules
 
