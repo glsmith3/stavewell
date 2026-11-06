@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,51 +247,119 @@ func seed(t *testing.T, s *Store) {
 	}
 }
 
-// recordsSnapshot returns every record's ledger, sequence, data and
-// idempotency key, in order, as one string.
-func recordsSnapshot(t *testing.T, db *sql.DB) string {
+// dbSnapshot returns the contents of every table, as one string.
+func dbSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	var snap string
-	err := db.QueryRowContext(context.Background(),
-		`SELECT COALESCE(group_concat(ledger_id || ':' || sequence || ':' || data || ':' || COALESCE(idempotency_key, ''), ' '), '')
-		 FROM (SELECT * FROM records ORDER BY ledger_id, sequence)`).Scan(&snap)
+	ctx := context.Background()
+	var tables []string
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return snap
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, table := range tables {
+		rows, err := db.QueryContext(ctx, "SELECT * FROM "+table+" ORDER BY rowid")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintln(&b, table, vals)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+	}
+	return b.String()
 }
 
-func TestRecordsAreAppendOnly(t *testing.T) {
+func TestProtectedRowsCannotChange(t *testing.T) {
 	ctx := context.Background()
-	insert := func(verb, seq, data, key string) string {
+	record := func(verb, seq, data, key string) string {
 		return verb + ` INTO records (ledger_id, sequence, created_at, data, data_hash, previous_hash, hash, idempotency_key)
 			VALUES (1, ` + seq + `, '` + testTime + `', '` + data + `', '` + zeroHash + `', '` + zeroHash + `', '` + zeroHash + `', ` + key + `)`
 	}
+	otherHash := strings.Repeat("9", 64)
 	tests := []struct {
-		name string
-		stmt string
+		name  string
+		setup string // optional, run before the snapshot
+		stmt  string
+		want  string // part of the expected error message
 	}{
-		{"update data", `UPDATE records SET data = '{"changed":1}' WHERE ledger_id = 1 AND sequence = 1`},
-		{"update idempotency key", `UPDATE records SET idempotency_key = 'k' WHERE ledger_id = 1 AND sequence = 1`},
-		{"update or replace", `UPDATE OR REPLACE records SET sequence = 1 WHERE ledger_id = 1 AND sequence = 2`},
-		{"delete", `DELETE FROM records WHERE ledger_id = 1 AND sequence = 1`},
-		{"insert or replace, same sequence", insert("INSERT OR REPLACE", "1", `{"forged":true}`, "NULL")},
-		{"replace, same sequence", insert("REPLACE", "1", `{"forged":true}`, "NULL")},
-		{"insert or replace, same idempotency key", insert("INSERT OR REPLACE", "3", `{"forged":true}`, "'k2'")},
-		{"upsert", insert("INSERT", "1", `{"forged":true}`, "NULL") + ` ON CONFLICT DO UPDATE SET data = excluded.data`},
+		{"record: update data", "", `UPDATE records SET data = '{"changed":1}' WHERE ledger_id = 1 AND sequence = 1`, "append-only"},
+		{"record: update idempotency key", "", `UPDATE records SET idempotency_key = 'k' WHERE ledger_id = 1 AND sequence = 1`, "append-only"},
+		{"record: update or replace", "", `UPDATE OR REPLACE records SET sequence = 1 WHERE ledger_id = 1 AND sequence = 2`, "append-only"},
+		{"record: delete", "", `DELETE FROM records WHERE ledger_id = 1 AND sequence = 1`, "append-only"},
+		{"record: insert or replace, same sequence", "", record("INSERT OR REPLACE", "1", `{"forged":true}`, "NULL"), "sequence number already used"},
+		{"record: replace, same sequence", "", record("REPLACE", "1", `{"forged":true}`, "NULL"), "sequence number already used"},
+		{"record: insert or replace, same idempotency key", "", record("INSERT OR REPLACE", "3", `{"forged":true}`, "'k2'"), "idempotency key already used"},
+		{"record: insert or ignore, same idempotency key", "", record("INSERT OR IGNORE", "3", `{}`, "'k2'"), "idempotency key already used"},
+		{"record: upsert", "", record("INSERT", "1", `{"forged":true}`, "NULL") + ` ON CONFLICT DO UPDATE SET data = excluded.data`, "sequence number already used"},
+
+		{"ledger: move to another organization", "", `UPDATE ledgers SET organization_id = 2, name = 'moved' WHERE id = 1`, "ledgers never change"},
+		{"ledger: rename", "", `UPDATE ledgers SET name = 'renamed' WHERE id = 1`, "ledgers never change"},
+		{"ledger: delete", "", `DELETE FROM ledgers WHERE id = 1`, "ledgers are never deleted"},
+		{"ledger: replace by row number", "", `INSERT OR REPLACE INTO ledgers (id, organization_id, name, created_at) VALUES (1, 2, 'stolen', '` + testTime + `')`, "ledgers are never replaced"},
+		{"ledger: replace by name", "", `INSERT OR REPLACE INTO ledgers (id, organization_id, name, created_at) VALUES (9, 1, 'orders', '` + testTime + `')`, "ledgers are never replaced"},
+
+		{"organization: change public ID", "", `UPDATE organizations SET public_id = 'org_zzzzzzzzzzzzzzzzzzzzzzzzzz' WHERE id = 1`, "never change"},
+		{"organization: change row number", "", `UPDATE organizations SET id = 9 WHERE id = 1`, "never change"},
+		{"organization: delete", "", `DELETE FROM organizations WHERE id = 1`, "never deleted"},
+		{"organization: replace by row number", "", `INSERT OR REPLACE INTO organizations (id, public_id, name, created_at) VALUES (1, 'org_zzzzzzzzzzzzzzzzzzzzzzzzzz', 'Other', '` + testTime + `')`, "never replaced"},
+		{"organization: replace by public ID", "", `INSERT OR REPLACE INTO organizations (id, public_id, name, created_at) VALUES (9, 'org_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'Other', '` + testTime + `')`, "never replaced"},
+
+		{"API key: move to another organization", "", `UPDATE api_keys SET organization_id = 2 WHERE id = 1`, "only an API key's revocation can change"},
+		{"API key: change key hash", "", `UPDATE api_keys SET key_hash = '` + otherHash + `' WHERE id = 1`, "only an API key's revocation can change"},
+		{"API key: extend expiry", "", `UPDATE api_keys SET expires_at = '2099-01-01T00:00:00.000Z' WHERE id = 1`, "only an API key's revocation can change"},
+		{"API key: un-revoke", `UPDATE api_keys SET revoked_at = '` + testTime + `' WHERE id = 1`, `UPDATE api_keys SET revoked_at = NULL WHERE id = 1`, "stays revoked"},
+		{"API key: change revocation time", `UPDATE api_keys SET revoked_at = '` + testTime + `' WHERE id = 1`, `UPDATE api_keys SET revoked_at = '2099-01-01T00:00:00.000Z' WHERE id = 1`, "stays revoked"},
+		{"API key: delete", "", `DELETE FROM api_keys WHERE id = 1`, "never deleted"},
+		{"API key: replace by row number", "", `INSERT OR REPLACE INTO api_keys (id, public_id, organization_id, name, key_hash, created_at, expires_at) VALUES (1, 'key_zzzzzzzzzzzzzzzzzzzzzzzzzz', 2, 'k', '` + otherHash + `', '` + testTime + `', '` + testTime + `')`, "never replaced"},
+		{"API key: replace by key hash", "", `INSERT OR REPLACE INTO api_keys (id, public_id, organization_id, name, key_hash, created_at, expires_at) VALUES (9, 'key_zzzzzzzzzzzzzzzzzzzzzzzzzz', 2, 'k', '` + zeroHash + `', '` + testTime + `', '` + testTime + `')`, "never replaced"},
+
+		{"API key scope: change", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, `UPDATE api_key_scopes SET scope = 'ledger:write' WHERE api_key_id = 1`, "scopes never change"},
+		{"API key scope: delete", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, `DELETE FROM api_key_scopes WHERE api_key_id = 1`, "scopes never change"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, path := openTestStore(t)
 			seed(t, s)
-			if _, err := s.write.ExecContext(ctx, insert("INSERT", "2", "{}", "'k2'")); err != nil {
-				t.Fatal(err)
+			for _, stmt := range []string{record("INSERT", "2", "{}", "'k2'"), tt.setup} {
+				if stmt == "" {
+					continue
+				}
+				if _, err := s.write.ExecContext(ctx, stmt); err != nil {
+					t.Fatalf("setup: %v\n%s", err, stmt)
+				}
 			}
-			before := recordsSnapshot(t, s.read)
+			before := dbSnapshot(t, s.read)
 
 			// Run the statement on Stavewell's own connection, and on a plain
-			// connection with SQLite's default settings, as a tool such as
-			// the sqlite3 shell would open.
+			// connection with SQLite's default settings (foreign keys off,
+			// recursive triggers off), as a tool such as the sqlite3 shell
+			// would open.
 			plain, err := sql.Open("sqlite", path)
 			if err != nil {
 				t.Fatal(err)
@@ -298,12 +367,12 @@ func TestRecordsAreAppendOnly(t *testing.T) {
 			defer plain.Close()
 			for name, db := range map[string]*sql.DB{"store": s.write, "plain": plain} {
 				_, err := db.ExecContext(ctx, tt.stmt)
-				if err == nil || !strings.Contains(err.Error(), "append-only") {
-					t.Errorf("%s connection: err = %v, want an append-only error", name, err)
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Errorf("%s connection: err = %v, want an error containing %q", name, err, tt.want)
 				}
 			}
-			if after := recordsSnapshot(t, s.read); after != before {
-				t.Errorf("records changed:\nbefore: %s\nafter:  %s", before, after)
+			if after := dbSnapshot(t, s.read); after != before {
+				t.Errorf("database changed:\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 		})
 	}
@@ -325,6 +394,10 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{"record: duplicate sequence", record("1", testTime, "'{}'", zeroHash, "NULL")},
 		{"record: unknown ledger", strings.Replace(record("2", testTime, "'{}'", zeroHash, "NULL"), "VALUES (1,", "VALUES (99,", 1)},
 		{"record: time without milliseconds", record("2", "2026-11-06T19:22:31Z", "'{}'", zeroHash, "NULL")},
+		{"record: time with a space instead of T", record("2", "2026-11-06 19:22:31.123Z", "'{}'", zeroHash, "NULL")},
+		{"record: time without a zone", record("2", "2026-11-06T19:22:31.123", "'{}'", zeroHash, "NULL")},
+		{"record: impossible time", record("2", "2026-99-99T99:99:99.999Z", "'{}'", zeroHash, "NULL")},
+		{"record: February 30", record("2", "2026-02-30T00:00:00.000Z", "'{}'", zeroHash, "NULL")},
 		{"record: data that isn't JSON", record("2", testTime, "'{not json'", zeroHash, "NULL")},
 		{"record: short hash", record("2", testTime, "'{}'", "abc", "NULL")},
 		{"record: uppercase hash", record("2", testTime, "'{}'", strings.Repeat("A", 64), "NULL")},
@@ -346,6 +419,7 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{"API key: unknown organization", `INSERT INTO api_keys (public_id, organization_id, name, key_hash, created_at, expires_at) VALUES ('key_bbbbbbbbbbbbbbbbbbbbbbbbbb', 99, 'k', '` + strings.Repeat("1", 64) + `', '` + testTime + `', '` + testTime + `')`},
 		{"API key scope: unknown scope", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:admin')`},
 		{"daily usage: malformed day", `INSERT INTO daily_usage (organization_id, day) VALUES (1, '2026-11-6')`},
+		{"daily usage: impossible day", `INSERT INTO daily_usage (organization_id, day) VALUES (1, '2026-13-01')`},
 		{"daily usage: negative count", `INSERT INTO daily_usage (organization_id, day, records_appended) VALUES (1, '2026-11-06', -1)`},
 	}
 	for _, tt := range tests {
@@ -376,7 +450,13 @@ func TestSchemaAcceptsValidRows(t *testing.T) {
 		`INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read'), (1, 'ledger:write')`,
 		// Revoking a key.
 		`UPDATE api_keys SET revoked_at = '` + testTime + `' WHERE id = 1`,
+		// Counters and an organization's display name can change.
 		`INSERT INTO daily_usage (organization_id, day, records_appended) VALUES (1, '2026-11-06', 1)`,
+		`UPDATE daily_usage SET records_appended = records_appended + 1 WHERE organization_id = 1 AND day = '2026-11-06'`,
+		`UPDATE organizations SET stored_data_bytes = stored_data_bytes + 2 WHERE id = 1`,
+		`UPDATE organizations SET name = 'Renamed' WHERE id = 1`,
+		// A leap day, and the last millisecond of a day.
+		`INSERT INTO records (ledger_id, sequence, created_at, data, data_hash, previous_hash, hash) VALUES (1, 5, '2028-02-29T23:59:59.999Z', '{}', '` + zeroHash + `', '` + zeroHash + `', '` + zeroHash + `')`,
 		// Public IDs exactly as the ID generator makes them.
 		`INSERT INTO organizations (id, public_id, name, created_at) VALUES (3, '` + ids.New("org") + `', 'Generated', '` + testTime + `')`,
 		`INSERT INTO api_keys (public_id, organization_id, name, key_hash, created_at, expires_at) VALUES ('` + ids.New("key") + `', 3, 'k', '` + strings.Repeat("2", 64) + `', '` + testTime + `', '` + testTime + `')`,
