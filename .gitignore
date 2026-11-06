@@ -1,0 +1,12 @@
+# Built binaries
+/stavewell
+/bin/
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Local environment files
+.env
+.env.*

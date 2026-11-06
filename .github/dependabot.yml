@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week after a release before proposing it, so bad or malicious
+    # releases have time to be caught.
+    cooldown:
+      default-days: 7
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
