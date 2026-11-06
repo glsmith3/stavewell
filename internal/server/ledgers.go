@@ -21,7 +21,11 @@ var errNoPrincipal = errors.New("server: no authenticated caller for a route tha
 
 // ledgerJSON returns the API form of l.
 func ledgerJSON(l store.Ledger) api.Ledger {
-	return api.Ledger{Name: l.Name, CreatedAt: store.FormatTime(l.CreatedAt)}
+	j := api.Ledger{Name: l.Name, CreatedAt: store.FormatTime(l.CreatedAt)}
+	if l.LatestSequence > 0 {
+		j.LatestSequence, j.LatestHash = &l.LatestSequence, &l.LatestHash
+	}
+	return j
 }
 
 // CreateLedger creates a ledger in the caller's organization.

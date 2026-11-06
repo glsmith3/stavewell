@@ -35,6 +35,37 @@ func ValidLedgerName(name string) bool {
 type Ledger struct {
 	Name      string
 	CreatedAt time.Time
+	// LatestSequence is the sequence number of the ledger's latest record,
+	// or 0 if the ledger has no records.
+	LatestSequence int64
+	// LatestHash is the record hash of the ledger's latest record, or empty
+	// if the ledger has no records.
+	LatestHash string
+}
+
+// ledgerColumns selects a ledger's columns, including its latest record's
+// sequence number and hash, from the ledgers table as l. The latest record
+// is found through the records table's primary key.
+const ledgerColumns = `l.name, l.created_at, r.sequence, r.hash
+	FROM ledgers l
+	LEFT JOIN records r ON r.ledger_id = l.id
+	 AND r.sequence = (SELECT MAX(sequence) FROM records WHERE ledger_id = l.id)`
+
+// scanLedger reads a row selected with ledgerColumns.
+func scanLedger(row interface{ Scan(...any) error }) (Ledger, error) {
+	var l Ledger
+	var created string
+	var seq sql.NullInt64
+	var hash sql.NullString
+	if err := row.Scan(&l.Name, &created, &seq, &hash); err != nil {
+		return Ledger{}, err
+	}
+	t, err := parseTime(created)
+	if err != nil {
+		return Ledger{}, err
+	}
+	l.CreatedAt, l.LatestSequence, l.LatestHash = t, seq.Int64, hash.String
+	return l, nil
 }
 
 // CreateLedger adds an empty ledger to the organization with internal row
@@ -84,20 +115,15 @@ func (s *Store) CreateLedger(ctx context.Context, orgRowID int64, name string, n
 
 // GetLedger returns the organization's ledger with the name, or ErrNotFound.
 func (s *Store) GetLedger(ctx context.Context, orgRowID int64, name string) (Ledger, error) {
-	var created string
-	err := s.read.QueryRowContext(ctx,
-		"SELECT created_at FROM ledgers WHERE organization_id = ? AND name = ?", orgRowID, name).Scan(&created)
+	l, err := scanLedger(s.read.QueryRowContext(ctx,
+		"SELECT "+ledgerColumns+" WHERE l.organization_id = ? AND l.name = ?", orgRowID, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Ledger{}, ErrNotFound
 	}
 	if err != nil {
 		return Ledger{}, fmt.Errorf("store: getting ledger: %w", err)
 	}
-	t, err := parseTime(created)
-	if err != nil {
-		return Ledger{}, err
-	}
-	return Ledger{Name: name, CreatedAt: t}, nil
+	return l, nil
 }
 
 // ListLedgers returns up to limit of the organization's ledgers, in the order
@@ -122,20 +148,16 @@ func (s *Store) ListLedgers(ctx context.Context, orgRowID int64, after string, l
 		}
 	}
 	rows, err := s.read.QueryContext(ctx,
-		"SELECT name, created_at FROM ledgers WHERE organization_id = ? AND id > ? ORDER BY id LIMIT ?",
+		"SELECT "+ledgerColumns+" WHERE l.organization_id = ? AND l.id > ? ORDER BY l.id LIMIT ?",
 		orgRowID, afterRowID, limit+1)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: listing ledgers: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var l Ledger
-		var created string
-		if err := rows.Scan(&l.Name, &created); err != nil {
+		l, err := scanLedger(rows)
+		if err != nil {
 			return nil, false, fmt.Errorf("store: listing ledgers: %w", err)
-		}
-		if l.CreatedAt, err = parseTime(created); err != nil {
-			return nil, false, err
 		}
 		ledgers = append(ledgers, l)
 	}

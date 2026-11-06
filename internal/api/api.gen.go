@@ -31,6 +31,13 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// AppendRecordRequest defines model for AppendRecordRequest.
+type AppendRecordRequest struct {
+	// Data The record's content. It must follow the rules in "Record data"
+	// in the API description.
+	Data json.RawMessage `json:"data"`
+}
+
 // CreateLedgerRequest defines model for CreateLedgerRequest.
 type CreateLedgerRequest struct {
 	// Name 1 to 64 characters: lowercase letters, digits and hyphens, starting
@@ -40,6 +47,11 @@ type CreateLedgerRequest struct {
 	// Examples: orders
 	Name LedgerName `json:"name"`
 }
+
+// Hash A SHA-256 hash, written as 64 lowercase hexadecimal characters.
+//
+// Examples: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+type Hash = string
 
 // Health defines model for Health.
 type Health struct {
@@ -64,6 +76,21 @@ type Ledger struct {
 	//
 	// Examples: 2026-11-06T19:22:31.123Z
 	CreatedAt string `json:"created_at"`
+
+	// LatestSequence The sequence number of the ledger's latest record, which is also
+	// the number of records in the ledger. It's `null` if the ledger has
+	// no records.
+	//
+	//
+	// Examples: 2
+	LatestSequence *int64 `json:"latest_sequence"`
+
+	// LatestHash The record hash of the ledger's latest record. It's `null` if the
+	// ledger has no records.
+	//
+	//
+	// Examples: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
+	LatestHash *string `json:"latest_hash"`
 }
 
 // LedgerList defines model for LedgerList.
@@ -119,6 +146,64 @@ type Problem struct {
 	RequestId string `json:"request_id"`
 }
 
+// Record defines model for Record.
+type Record struct {
+	// Ledger 1 to 64 characters: lowercase letters, digits and hyphens, starting
+	// with a letter. Unique within your organization.
+	//
+	//
+	// Examples: orders
+	Ledger LedgerName `json:"ledger"`
+
+	// Sequence The record's sequence number. Records in a ledger are numbered
+	// from 1, in the order they were appended, with no gaps.
+	//
+	//
+	// Examples: 1
+	Sequence int64 `json:"sequence"`
+
+	// CreatedAt When the record was appended, in UTC with three fractional digits.
+	// It's never earlier than the previous record's `created_at`.
+	//
+	//
+	// Examples: 2026-11-06T19:22:31.123Z
+	CreatedAt string `json:"created_at"`
+
+	// Data The record's content, as canonical JSON. See "Record data" in the
+	// API description.
+	Data json.RawMessage `json:"data"`
+
+	// DataHash The SHA-256 hash of the canonical JSON of `data`.
+	//
+	// Examples: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+	DataHash Hash `json:"data_hash"`
+
+	// PreviousHash The record hash of the previous record, or 64 zeros for record 1.
+	//
+	//
+	// Examples: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+	PreviousHash Hash `json:"previous_hash"`
+
+	// Hash The record hash. See "Record hashes" in the API description.
+	//
+	//
+	// Examples: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
+	Hash Hash `json:"hash"`
+}
+
+// RecordList defines model for RecordList.
+type RecordList struct {
+	// Records A page of records, in sequence order.
+	Records []Record `json:"records"`
+
+	// NextCursor Pass this as `cursor` to get the next page. It's present even on
+	// the last page.
+	NextCursor string `json:"next_cursor"`
+
+	// HasMore Whether more records existed after this page when the request ran.
+	HasMore bool `json:"has_more"`
+}
+
 // Version defines model for Version.
 type Version struct {
 	// Commit The source commit the server was built from. If the server was
@@ -139,6 +224,12 @@ type Version struct {
 
 // Cursor defines model for Cursor.
 type Cursor = string
+
+// LedgerNamePath 1 to 64 characters: lowercase letters, digits and hyphens, starting
+// with a letter. Unique within your organization.
+//
+// Examples: orders
+type LedgerNamePath = LedgerName
 
 // Limit defines model for Limit.
 type Limit = int
@@ -165,8 +256,21 @@ type ListLedgersParams struct {
 	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
+// ListRecordsParams defines parameters for ListRecords.
+type ListRecordsParams struct {
+	// Limit The most items to return, from 1 to 100. The default is 100.
+	Limit *Limit `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Where the page starts: the `next_cursor` from an earlier page of the
+	// same list. Without it, the list starts at the beginning.
+	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
 // CreateLedgerJSONRequestBody defines body for CreateLedger for application/json ContentType.
 type CreateLedgerJSONRequestBody = CreateLedgerRequest
+
+// AppendRecordJSONRequestBody defines body for AppendRecord for application/json ContentType.
+type AppendRecordJSONRequestBody = AppendRecordRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -181,7 +285,16 @@ type ServerInterface interface {
 	CreateLedger(w http.ResponseWriter, r *http.Request)
 	// GetLedger Get a ledger
 	// (GET /v1/ledgers/{name})
-	GetLedger(w http.ResponseWriter, r *http.Request, name LedgerName)
+	GetLedger(w http.ResponseWriter, r *http.Request, name LedgerNamePath)
+	// ListRecords List records
+	// (GET /v1/ledgers/{name}/records)
+	ListRecords(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params ListRecordsParams)
+	// AppendRecord Append a record
+	// (POST /v1/ledgers/{name}/records)
+	AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath)
+	// GetRecord Get a record
+	// (GET /v1/ledgers/{name}/records/{sequence})
+	GetRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath, sequence int64)
 	// GetVersion Get the server version
 	// (GET /version)
 	GetVersion(w http.ResponseWriter, r *http.Request)
@@ -277,7 +390,7 @@ func (siw *ServerInterfaceWrapper) GetLedger(w http.ResponseWriter, r *http.Requ
 	_ = err
 
 	// ------------- Path parameter "name" -------------
-	var name LedgerName
+	var name LedgerNamePath
 
 	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
 	if err != nil {
@@ -287,6 +400,122 @@ func (siw *ServerInterfaceWrapper) GetLedger(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetLedger(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListRecords operation middleware
+func (siw *ServerInterfaceWrapper) ListRecords(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name LedgerNamePath
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListRecordsParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListRecords(w, r, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AppendRecord operation middleware
+func (siw *ServerInterfaceWrapper) AppendRecord(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name LedgerNamePath
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AppendRecord(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetRecord operation middleware
+func (siw *ServerInterfaceWrapper) GetRecord(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name LedgerNamePath
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "sequence" -------------
+	var sequence int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "sequence", r.PathValue("sequence"), &sequence, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "sequence", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetRecord(w, r, name, sequence)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -435,6 +664,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers", wrapper.ListLedgers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/ledgers", wrapper.CreateLedger)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}", wrapper.GetLedger)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}/records", wrapper.ListRecords)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/ledgers/{name}/records", wrapper.AppendRecord)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}/records/{sequence}", wrapper.GetRecord)
 
 	return m
 }
@@ -696,7 +928,7 @@ func (response CreateLedger500ApplicationProblemPlusJSONResponse) VisitCreateLed
 }
 
 type GetLedgerRequestObject struct {
-	Name LedgerName `json:"name"`
+	Name LedgerNamePath `json:"name"`
 }
 
 type GetLedgerResponseObject interface {
@@ -782,6 +1014,326 @@ func (response GetLedger500ApplicationProblemPlusJSONResponse) VisitGetLedgerRes
 	return err
 }
 
+type ListRecordsRequestObject struct {
+	Name   LedgerNamePath `json:"name"`
+	Params ListRecordsParams
+}
+
+type ListRecordsResponseObject interface {
+	VisitListRecordsResponse(w http.ResponseWriter) error
+}
+
+type ListRecords200JSONResponse RecordList
+
+func (response ListRecords200JSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListRecords400ApplicationProblemPlusJSONResponse Problem
+
+func (response ListRecords400ApplicationProblemPlusJSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListRecords401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListRecords401ApplicationProblemPlusJSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.WWWAuthenticate != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprint(*response.Headers.WWWAuthenticate))
+	}
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListRecords403ApplicationProblemPlusJSONResponse struct {
+	InsufficientScopeApplicationProblemPlusJSONResponse
+}
+
+func (response ListRecords403ApplicationProblemPlusJSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListRecords404ApplicationProblemPlusJSONResponse Problem
+
+func (response ListRecords404ApplicationProblemPlusJSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListRecords500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response ListRecords500ApplicationProblemPlusJSONResponse) VisitListRecordsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecordRequestObject struct {
+	Name LedgerNamePath `json:"name"`
+	Body *AppendRecordJSONRequestBody
+}
+
+type AppendRecordResponseObject interface {
+	VisitAppendRecordResponse(w http.ResponseWriter) error
+}
+
+type AppendRecord201JSONResponse Record
+
+func (response AppendRecord201JSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord400ApplicationProblemPlusJSONResponse Problem
+
+func (response AppendRecord400ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AppendRecord401ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.WWWAuthenticate != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprint(*response.Headers.WWWAuthenticate))
+	}
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord403ApplicationProblemPlusJSONResponse struct {
+	InsufficientScopeApplicationProblemPlusJSONResponse
+}
+
+func (response AppendRecord403ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord404ApplicationProblemPlusJSONResponse Problem
+
+func (response AppendRecord404ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord413ApplicationProblemPlusJSONResponse Problem
+
+func (response AppendRecord413ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response AppendRecord500ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecordRequestObject struct {
+	Name     LedgerNamePath `json:"name"`
+	Sequence int64          `json:"sequence"`
+}
+
+type GetRecordResponseObject interface {
+	VisitGetRecordResponse(w http.ResponseWriter) error
+}
+
+type GetRecord200JSONResponse Record
+
+func (response GetRecord200JSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecord400ApplicationProblemPlusJSONResponse Problem
+
+func (response GetRecord400ApplicationProblemPlusJSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecord401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetRecord401ApplicationProblemPlusJSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.WWWAuthenticate != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprint(*response.Headers.WWWAuthenticate))
+	}
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecord403ApplicationProblemPlusJSONResponse struct {
+	InsufficientScopeApplicationProblemPlusJSONResponse
+}
+
+func (response GetRecord403ApplicationProblemPlusJSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecord404ApplicationProblemPlusJSONResponse Problem
+
+func (response GetRecord404ApplicationProblemPlusJSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRecord500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response GetRecord500ApplicationProblemPlusJSONResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetVersionRequestObject struct {
 }
 
@@ -833,6 +1385,15 @@ type StrictServerInterface interface {
 	// GetLedger Get a ledger
 	// (GET /v1/ledgers/{name})
 	GetLedger(ctx context.Context, request GetLedgerRequestObject) (GetLedgerResponseObject, error)
+	// ListRecords List records
+	// (GET /v1/ledgers/{name}/records)
+	ListRecords(ctx context.Context, request ListRecordsRequestObject) (ListRecordsResponseObject, error)
+	// AppendRecord Append a record
+	// (POST /v1/ledgers/{name}/records)
+	AppendRecord(ctx context.Context, request AppendRecordRequestObject) (AppendRecordResponseObject, error)
+	// GetRecord Get a record
+	// (GET /v1/ledgers/{name}/records/{sequence})
+	GetRecord(ctx context.Context, request GetRecordRequestObject) (GetRecordResponseObject, error)
 	// GetVersion Get the server version
 	// (GET /version)
 	GetVersion(ctx context.Context, request GetVersionRequestObject) (GetVersionResponseObject, error)
@@ -959,7 +1520,7 @@ func (sh *strictHandler) CreateLedger(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetLedger operation middleware
-func (sh *strictHandler) GetLedger(w http.ResponseWriter, r *http.Request, name LedgerName) {
+func (sh *strictHandler) GetLedger(w http.ResponseWriter, r *http.Request, name LedgerNamePath) {
 	var request GetLedgerRequestObject
 
 	request.Name = name
@@ -977,6 +1538,93 @@ func (sh *strictHandler) GetLedger(w http.ResponseWriter, r *http.Request, name 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetLedgerResponseObject); ok {
 		if err := validResponse.VisitGetLedgerResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListRecords operation middleware
+func (sh *strictHandler) ListRecords(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params ListRecordsParams) {
+	var request ListRecordsRequestObject
+
+	request.Name = name
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListRecords(ctx, request.(ListRecordsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListRecords")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListRecordsResponseObject); ok {
+		if err := validResponse.VisitListRecordsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AppendRecord operation middleware
+func (sh *strictHandler) AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath) {
+	var request AppendRecordRequestObject
+
+	request.Name = name
+
+	var body AppendRecordJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AppendRecord(ctx, request.(AppendRecordRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AppendRecord")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AppendRecordResponseObject); ok {
+		if err := validResponse.VisitAppendRecordResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetRecord operation middleware
+func (sh *strictHandler) GetRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath, sequence int64) {
+	var request GetRecordRequestObject
+
+	request.Name = name
+	request.Sequence = sequence
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetRecord(ctx, request.(GetRecordRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetRecord")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetRecordResponseObject); ok {
+		if err := validResponse.VisitGetRecordResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

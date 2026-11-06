@@ -198,7 +198,15 @@ func specCases() []specCase {
 		}
 		return key
 	}
+	withRecord := func(t *testing.T, e *env) string {
+		key := withOrders(t, e)
+		appendRecord(t, e, key, "orders", `{"order_id":"A-1001","amount":"12.50","quantity":2}`)
+		return key
+	}
 	big := `{"name":"orders","padding":"` + strings.Repeat("x", 64<<10) + `"}`
+	bigData := `{"data":{"padding":"` + strings.Repeat("x", 64<<10) + `"}}`
+	largeRecord := `{"data":{"padding":"` + strings.Repeat("x", 16<<10) + `"}}`
+	order := `{"data":{"order_id":"A-1001","amount":"12.50","quantity":2}}`
 	return []specCase{
 		{"health", none, "GET", "/health", "", 200, ""},
 		{"version", none, "GET", "/version", "", 200, ""},
@@ -219,6 +227,32 @@ func specCases() []specCase {
 		{"get a missing ledger", full, "GET", "/v1/ledgers/missing", "", 404, "ledger-not-found"},
 		{"get without a key", none, "GET", "/v1/ledgers/orders", "", 401, "unauthorized"},
 		{"get with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders", "", 403, "insufficient-scope"},
+		{"get a ledger with records", withRecord, "GET", "/v1/ledgers/orders", "", 200, ""},
+		{"list ledgers with records", withRecord, "GET", "/v1/ledgers", "", 200, ""},
+
+		{"append", withOrders, "POST", "/v1/ledgers/orders/records", order, 201, ""},
+		{"append to a ledger with records", withRecord, "POST", "/v1/ledgers/orders/records", order, 201, ""},
+		{"append with an extra field", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{},"extra":1}`, 400, "invalid-request"},
+		{"append a decimal number", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{"amount":12.5}}`, 400, "invalid-record-data"},
+		{"append without a key", none, "POST", "/v1/ledgers/orders/records", order, 401, "unauthorized"},
+		{"append with a read-only key", readOnly, "POST", "/v1/ledgers/orders/records", order, 403, "insufficient-scope"},
+		{"append to a missing ledger", full, "POST", "/v1/ledgers/missing/records", order, 404, "ledger-not-found"},
+		{"append a large record", withOrders, "POST", "/v1/ledgers/orders/records", largeRecord, 413, "record-too-large"},
+		{"append with a large body", withOrders, "POST", "/v1/ledgers/orders/records", bigData, 413, "request-too-large"},
+		{"list records", withRecord, "GET", "/v1/ledgers/orders/records", "", 200, ""},
+		{"list records of an empty ledger", withOrders, "GET", "/v1/ledgers/orders/records", "", 200, ""},
+		{"list records with limit 0", withOrders, "GET", "/v1/ledgers/orders/records?limit=0", "", 400, "invalid-request"},
+		{"list records with a bad cursor", withOrders, "GET", "/v1/ledgers/orders/records?cursor=nope", "", 400, "invalid-cursor"},
+		{"list records without a key", none, "GET", "/v1/ledgers/orders/records", "", 401, "unauthorized"},
+		{"list records with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records", "", 403, "insufficient-scope"},
+		{"list records of a missing ledger", full, "GET", "/v1/ledgers/missing/records", "", 404, "ledger-not-found"},
+		{"get a record", withRecord, "GET", "/v1/ledgers/orders/records/1", "", 200, ""},
+		{"get record 0", withRecord, "GET", "/v1/ledgers/orders/records/0", "", 400, "invalid-request"},
+		{"get a record by a non-number", withRecord, "GET", "/v1/ledgers/orders/records/first", "", 400, "invalid-request"},
+		{"get a record without a key", none, "GET", "/v1/ledgers/orders/records/1", "", 401, "unauthorized"},
+		{"get a record with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records/1", "", 403, "insufficient-scope"},
+		{"get a missing record", withRecord, "GET", "/v1/ledgers/orders/records/2", "", 404, "record-not-found"},
+		{"get a record from a missing ledger", full, "GET", "/v1/ledgers/missing/records/1", "", 404, "ledger-not-found"},
 	}
 }
 
@@ -838,6 +872,13 @@ func TestAuthenticationComesFirst(t *testing.T) {
 		{"POST", "/v1/ledgers", "not json"},
 		{"POST", "/v1/ledgers", big},
 		{"GET", "/v1/ledgers/Not-A-Name", ""},
+		{"POST", "/v1/ledgers/orders/records", "not json"},
+		{"POST", "/v1/ledgers/orders/records", `{"data":{"amount":12.5}}`},
+		{"POST", "/v1/ledgers/orders/records", `{"data":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}`},
+		{"POST", "/v1/ledgers/orders/records", `{"data":{"padding":"` + strings.Repeat("x", 70<<10) + `"}}`},
+		{"GET", "/v1/ledgers/orders/records?cursor=nope", ""},
+		{"GET", "/v1/ledgers/orders/records/abc", ""},
+		{"GET", "/v1/ledgers/orders/records/0", ""},
 	} {
 		checkProblem(t, e.do(t, c.method, c.path, "", c.body), "unauthorized", http.StatusUnauthorized)
 	}

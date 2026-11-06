@@ -96,8 +96,9 @@ func TestLedgerLimit(t *testing.T) {
 }
 
 // TestLedgerLimitUnderConcurrency checks that the limit holds when many
-// requests create ledgers at once. It depends on write transactions taking
-// the write lock when they begin.
+// requests create ledgers at once. It depends on each creation's checks and
+// its insert running in one write transaction that no other write can
+// interleave with.
 func TestLedgerLimitUnderConcurrency(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTestStore(t)

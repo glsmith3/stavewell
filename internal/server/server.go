@@ -110,6 +110,8 @@ func parameterErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.
 			errors.As(err, &many) && many.ParamName == "cursor":
 			writeProblem(w, r, problemInvalidCursor, detailInvalidCursor)
 			return
+		case errors.As(err, &format) && format.ParamName == "sequence":
+			detail = detailInvalidSequence
 		}
 		writeProblem(w, r, problemInvalidRequest, detail)
 	}
