@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -128,15 +129,18 @@ func TestErrorHandlersHideDetails(t *testing.T) {
 	}
 }
 
-func TestRecoverPanicsReturnsProblem(t *testing.T) {
+// TestMiddlewareTurnsPanicIntoProblem runs a panicking handler through the
+// full middleware chain, so a wrong middleware order is caught too.
+func TestMiddlewareTurnsPanicIntoProblem(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	h := withRequestID(logRequests(logger, recoverPanics(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /panic", func(http.ResponseWriter, *http.Request) {
 		panic("lost connection to /var/lib/stavewell/data.db")
-	}))))
+	})
 	w := httptest.NewRecorder()
 
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
+	withMiddleware(logger, mux).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panic", nil))
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
@@ -148,12 +152,35 @@ func TestRecoverPanicsReturnsProblem(t *testing.T) {
 	if p.Type != typeURLBase+"internal-error" {
 		t.Errorf("type = %q, want internal-error", p.Type)
 	}
-	if !strings.Contains(logs.String(), "lost connection") {
-		t.Errorf("panic wasn't logged: %s", logs.String())
+	for header, want := range map[string]string{"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"} {
+		if got := w.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
 	}
-	if !strings.Contains(logs.String(), `"status":500`) {
-		t.Errorf("request log doesn't record status 500: %s", logs.String())
+	lines := logLines(t, &logs)
+	if len(lines) != 2 || lines[0]["msg"] != "panic" || lines[1]["msg"] != "request" {
+		t.Fatalf("log lines = %v, want a panic line, then a request line", lines)
 	}
+	if !strings.Contains(fmt.Sprint(lines[0]["panic"]), "lost connection") {
+		t.Errorf("panic line doesn't record the panic: %v", lines[0])
+	}
+	if lines[1]["status"] != float64(http.StatusInternalServerError) || lines[1]["request_id"] != p.RequestId {
+		t.Errorf("request line = %v, want status 500 and request_id %q", lines[1], p.RequestId)
+	}
+}
+
+// logLines decodes JSON log output, one object per line.
+func logLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("decoding log line %q: %v", line, err)
+		}
+		lines = append(lines, m)
+	}
+	return lines
 }
 
 func TestRecoverPanicsAbortsStartedResponse(t *testing.T) {
@@ -170,6 +197,92 @@ func TestRecoverPanicsAbortsStartedResponse(t *testing.T) {
 	}()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
 	t.Error("ServeHTTP returned normally, want a panic with http.ErrAbortHandler")
+}
+
+func TestRecoverPanicsAbortsAfterFlush(t *testing.T) {
+	// Flushing sends the headers, so after a flush an error response can't be
+	// sent either.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	h := logRequests(logger, recoverPanics(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("Flush() = %v", err)
+		}
+		panic("failed after flushing")
+	})))
+
+	defer func() {
+		if v := recover(); v != http.ErrAbortHandler {
+			t.Errorf("recovered %v, want http.ErrAbortHandler", v)
+		}
+	}()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	t.Error("ServeHTTP returned normally, want a panic with http.ErrAbortHandler")
+}
+
+func TestLogRequestsLogsAbortedRequests(t *testing.T) {
+	tests := []struct {
+		name       string
+		handler    http.HandlerFunc
+		wantStatus float64
+	}{
+		{"after the response started", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			panic("failed halfway through")
+		}, http.StatusOK},
+		{"before any response", func(http.ResponseWriter, *http.Request) {
+			panic(http.ErrAbortHandler)
+		}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			h := logRequests(logger, recoverPanics(logger, tt.handler))
+
+			func() {
+				defer func() { _ = recover() }()
+				h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+			}()
+
+			var request map[string]any
+			for _, line := range logLines(t, &logs) {
+				if line["msg"] == "request" {
+					request = line
+				}
+			}
+			if request == nil {
+				t.Fatalf("no request log line; log: %s", logs.String())
+			}
+			if request["aborted"] != true || request["status"] != tt.wantStatus {
+				t.Errorf("request line = %v, want aborted true and status %v", request, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestLogRequestsOmitsAbortedForCompletedRequests(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	h := logRequests(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if strings.Contains(logs.String(), "aborted") {
+		t.Errorf("log line for a completed request mentions aborted: %s", logs.String())
+	}
+}
+
+func TestStatusRecorderFlushMarksResponseStarted(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), status: http.StatusOK}
+	if err := http.NewResponseController(rec).Flush(); err != nil {
+		t.Fatalf("Flush() = %v", err)
+	}
+	if !rec.headerWritten() {
+		t.Error("headerWritten() = false after a flush, want true")
+	}
 }
 
 func TestRecoverPanicsPassesOnAbortHandler(t *testing.T) {

@@ -233,8 +233,45 @@ func TestWrongMethodReturnsProblem(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	checkProblem(t, resp, "method-not-allowed", http.StatusMethodNotAllowed)
-	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, http.MethodGet) {
-		t.Errorf("Allow = %q, want it to include GET", allow)
+	allow := resp.Header.Get("Allow")
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		if !strings.Contains(allow, method) {
+			t.Errorf("Allow = %q, want it to include %s", allow, method)
+		}
+	}
+}
+
+func TestHeadOnUnknownPathReturnsProblemHeaders(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := http.Head(srv.URL + "/no-such-path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("Content-Type = %q, want application/problem+json", ct)
+	}
+	if body, _ := io.ReadAll(resp.Body); len(body) != 0 {
+		t.Errorf("HEAD response has a body: %q", body)
+	}
+}
+
+// TestAsteriskRequestTargetReturnsProblem checks the request target "*",
+// which is valid only for OPTIONS.
+func TestAsteriskRequestTargetReturnsProblem(t *testing.T) {
+	h := server.Handler(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "*", nil))
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	checkProblem(t, resp, "invalid-request", http.StatusBadRequest)
+	if got := resp.Header.Get("Connection"); got != "close" {
+		t.Errorf("Connection = %q, want close", got)
 	}
 }
 

@@ -47,6 +47,12 @@ func Handler(logger *slog.Logger) http.Handler {
 		// same handler as other invalid requests.
 		ErrorHandlerFunc: requestErrorHandler(logger),
 	})
+	return withMiddleware(logger, mux)
+}
+
+// withMiddleware wraps mux in the middleware that every request passes
+// through, outermost first.
+func withMiddleware(logger *slog.Logger, mux *http.ServeMux) http.Handler {
 	return withRequestID(
 		logRequests(logger,
 			secureHeaders(
@@ -107,6 +113,15 @@ func requestID(ctx context.Context) string {
 // in plain text.
 func routeProblems(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI == "*" {
+			// "*" is a valid request target only for OPTIONS, which
+			// net/http answers before any handler runs. ServeMux.ServeHTTP
+			// rejects it for other methods, but mux.Handler doesn't, so
+			// reject it here.
+			w.Header().Set("Connection", "close")
+			writeProblem(w, r, problemInvalidRequest, detailInvalidRequest)
+			return
+		}
 		h, pattern := mux.Handler(r)
 		if pattern != "" {
 			// ServeHTTP, not h.ServeHTTP, so that path values are set.
@@ -222,6 +237,17 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// FlushError sends buffered response data to the client. It's defined here,
+// rather than reached through Unwrap, because flushing sends the headers, so
+// the response has started.
+func (r *statusRecorder) FlushError() error {
+	if err := http.NewResponseController(r.ResponseWriter).Flush(); err != nil {
+		return err
+	}
+	r.wroteHeader = true
+	return nil
+}
+
 // headerWritten reports whether the response has started. recoverPanics uses
 // it to decide whether an error response can still be sent.
 func (r *statusRecorder) headerWritten() bool {
@@ -237,17 +263,34 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 // logRequests logs one line per request. It logs only the method, path,
 // status, duration and request ID: never query strings, headers or bodies,
 // which can contain credentials.
+//
+// If the request is aborted by a panic, the line also has "aborted": true,
+// and the status is the one sent before the abort, or 0 if none was sent.
 func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		completed := false
+		// Log from a defer so that the line is written even when a panic
+		// aborts the request.
+		defer func() {
+			status := rec.status
+			if !completed && !rec.wroteHeader {
+				status = 0
+			}
+			attrs := []any{
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"request_id", requestID(r.Context()),
+			}
+			if !completed {
+				attrs = append(attrs, "aborted", true)
+			}
+			logger.Info("request", attrs...)
+		}()
 		next.ServeHTTP(rec, r)
-		logger.Info("request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.status,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"request_id", requestID(r.Context()),
-		)
+		completed = true
 	})
 }

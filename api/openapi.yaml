@@ -14,8 +14,9 @@ info:
 
     Use `type` to tell errors apart. It's a URL that never changes, and its
     last part is the error type's name. These error types can occur on any
-    path:
+    request:
 
+    - `invalid-request` (400): the request isn't valid.
     - `not-found` (404): no endpoint matches the request's path.
     - `method-not-allowed` (405): the endpoint doesn't accept the request's
       method. The `Allow` header lists the methods it accepts.
