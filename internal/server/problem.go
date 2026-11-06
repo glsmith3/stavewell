@@ -36,6 +36,7 @@ var (
 	problemLedgerExists      = problemType{"ledger-already-exists", "Ledger already exists", http.StatusConflict}
 	problemOrgLimit          = problemType{"organization-limit-reached", "Organization limit reached", http.StatusConflict}
 	problemRequestTooLarge   = problemType{"request-too-large", "Request too large", http.StatusRequestEntityTooLarge}
+	problemKeyReused         = problemType{"idempotency-key-reused", "Idempotency key reused", http.StatusUnprocessableEntity}
 	problemRecordTooLarge    = problemType{"record-too-large", "Record too large", http.StatusRequestEntityTooLarge}
 	problemInternal          = problemType{"internal-error", "Internal error", http.StatusInternalServerError}
 )
@@ -52,6 +53,8 @@ const (
 	detailInvalidLedgerName = "The ledger name must be 1 to 64 lowercase letters, digits and hyphens, starting with a letter."
 	detailInvalidSequence   = "The sequence number must be a whole number from 1 up."
 	detailMissingData       = "The request body must be a JSON object with a data field."
+	detailInvalidKey        = "The Idempotency-Key header must be 1 to 128 letters, digits, hyphens and underscores."
+	detailKeyReused         = "This idempotency key was already used in this ledger with different data, so nothing was appended."
 	detailUnauthorized      = "This request needs a valid API key in the Authorization header."
 	detailNotFound          = "No endpoint matches this path."
 	detailLedgerNotFound    = "Your organization has no ledger with this name."

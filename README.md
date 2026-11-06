@@ -123,7 +123,7 @@ curl -X POST http://127.0.0.1:8080/v1/ledgers \
 ```
 
 ```json
-{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}
+{"name":"orders","created_at":"2026-11-06T23:18:37.767Z","latest_sequence":null,"latest_hash":null}
 ```
 
 A ledger name is 1 to 64 lowercase letters, digits and hyphens, starting with a letter. It's unique within your organization and never changes. An organization can have up to 100 ledgers.
@@ -136,7 +136,7 @@ curl http://127.0.0.1:8080/v1/ledgers \
 ```
 
 ```json
-{"ledgers":[{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}],"next_cursor":"eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfdXVraW10bXlteGpodDdoM2Rib3pmdmltNHoiLCJhIjoib3JkZXJzIn0","has_more":false}
+{"ledgers":[{"name":"orders","created_at":"2026-11-06T23:18:37.767Z","latest_sequence":null,"latest_hash":null}],"next_cursor":"eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfd2c1cm1vN3B1bnozbmd6andiZTRqbXZjcXciLCJhIjoib3JkZXJzIn0","has_more":false}
 ```
 
 ```bash
@@ -145,7 +145,7 @@ curl http://127.0.0.1:8080/v1/ledgers/orders \
 ```
 
 ```json
-{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":null,"latest_hash":null}
+{"name":"orders","created_at":"2026-11-06T23:18:37.767Z","latest_sequence":null,"latest_hash":null}
 ```
 
 `latest_sequence` and `latest_hash` are the sequence number and record hash of the ledger's latest record. Both are `null` until you append a record.
@@ -153,7 +153,7 @@ curl http://127.0.0.1:8080/v1/ledgers/orders \
 The list returns up to 100 ledgers, or fewer if you set `limit`. To get the next page, pass `next_cursor` as the `cursor` parameter. A request without a valid key gets a `401` error:
 
 ```json
-{"type":"https://docs.stavewell.io/errors/unauthorized","title":"Unauthorized","status":401,"detail":"This request needs a valid API key in the Authorization header.","request_id":"req_tioxsvihwhufjmkfntqgxmzzdw"}
+{"type":"https://docs.stavewell.io/errors/unauthorized","title":"Unauthorized","status":401,"detail":"This request needs a valid API key in the Authorization header.","request_id":"req_xpyvomsfc4pwj4csbtdrl72qu2"}
 ```
 
 ## Records
@@ -170,7 +170,7 @@ curl -X POST http://127.0.0.1:8080/v1/ledgers/orders/records \
 ```
 
 ```json
-{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"}
+{"ledger":"orders","sequence":1,"created_at":"2026-11-06T23:18:37.786Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"cef54f7aac35a2d11ff884364b18d7d3b58173de26eba6d1b2ad544712138ad7"}
 ```
 
 Stavewell sets the other fields:
@@ -195,7 +195,7 @@ curl -X POST http://127.0.0.1:8080/v1/ledgers/orders/records \
 ```
 
 ```json
-{"type":"https://docs.stavewell.io/errors/invalid-record-data","title":"Invalid record data","status":400,"detail":"Numbers in data must be whole numbers from -9007199254740991 to 9007199254740991, written without a decimal point or exponent. Send other numbers as strings.","request_id":"req_rlhwf6t6vd7jmtouiw36bsxz6c"}
+{"type":"https://docs.stavewell.io/errors/invalid-record-data","title":"Invalid record data","status":400,"detail":"Numbers in data must be whole numbers from -9007199254740991 to 9007199254740991, written without a decimal point or exponent. Send other numbers as strings.","request_id":"req_5pbce2ote36sdoi2wntg3zos4c"}
 ```
 
 `data` can be up to 16 KiB in canonical form, nested up to 32 levels deep. The "Record data" section of `api/openapi.yaml` lists every rule.
@@ -208,7 +208,7 @@ curl http://127.0.0.1:8080/v1/ledgers/orders/records \
 ```
 
 ```json
-{"records":[{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"},{"ledger":"orders","sequence":2,"created_at":"2026-11-06T22:57:50.215Z","data":{"amount":"7.25","order_id":"A-1002","quantity":1},"data_hash":"86658e9cc2039fe716129d5f2f34d78d29d0efbaa929f07c8e7569e08c4f9fe5","previous_hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad","hash":"7979f94e80f8566795a6e3143c030fc752b4c309b42caaa0dfca87b495053a60"}],"next_cursor":"eyJ2IjoxLCJsIjoicmVjb3Jkcy9vcmRlcnMiLCJvIjoib3JnX3V1a2ltdG15bXhqaHQ3aDNkYm96ZnZpbTR6IiwiYSI6IjIifQ","has_more":false}
+{"records":[{"ledger":"orders","sequence":1,"created_at":"2026-11-06T23:18:37.786Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"cef54f7aac35a2d11ff884364b18d7d3b58173de26eba6d1b2ad544712138ad7"},{"ledger":"orders","sequence":2,"created_at":"2026-11-06T23:18:37.794Z","data":{"amount":"7.25","order_id":"A-1002","quantity":1},"data_hash":"86658e9cc2039fe716129d5f2f34d78d29d0efbaa929f07c8e7569e08c4f9fe5","previous_hash":"cef54f7aac35a2d11ff884364b18d7d3b58173de26eba6d1b2ad544712138ad7","hash":"0990eb658ef02189095bf37575c55fe48798f3de399bc61a7447ad719f25d848"}],"next_cursor":"eyJ2IjoxLCJsIjoicmVjb3Jkcy9vcmRlcnMiLCJvIjoib3JnX3dnNXJtbzdwdW56M25nemp3YmU0am12Y3F3IiwiYSI6IjIifQ","has_more":false}
 ```
 
 ```bash
@@ -217,7 +217,7 @@ curl http://127.0.0.1:8080/v1/ledgers/orders/records/1 \
 ```
 
 ```json
-{"ledger":"orders","sequence":1,"created_at":"2026-11-06T22:57:50.209Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"2d6e10ffa84ba5037ab43ac59e8381679a331ec029b6fd8044fe8363d0e0baad"}
+{"ledger":"orders","sequence":1,"created_at":"2026-11-06T23:18:37.786Z","data":{"amount":"12.50","order_id":"A-1001","quantity":2},"data_hash":"c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c","previous_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash":"cef54f7aac35a2d11ff884364b18d7d3b58173de26eba6d1b2ad544712138ad7"}
 ```
 
 The list returns records in sequence order, up to 100 at a time, or fewer if you set `limit`. Pages work as they do for ledgers, and `next_cursor` is present even on the last page. To follow a ledger, keep the last page's `next_cursor` and use it later: you get only the records appended since.
@@ -230,8 +230,40 @@ curl http://127.0.0.1:8080/v1/ledgers/orders \
 ```
 
 ```json
-{"name":"orders","created_at":"2026-11-06T22:57:50.190Z","latest_sequence":2,"latest_hash":"7979f94e80f8566795a6e3143c030fc752b4c309b42caaa0dfca87b495053a60"}
+{"name":"orders","created_at":"2026-11-06T23:18:37.767Z","latest_sequence":2,"latest_hash":"0990eb658ef02189095bf37575c55fe48798f3de399bc61a7447ad719f25d848"}
 ```
+
+### Retrying an append safely
+
+If an append times out, you can't tell whether the record was appended. To retry without creating a duplicate, send an `Idempotency-Key` header, and send the same key with every retry of that append:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/ledgers/orders/records \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-A-1003" \
+  -d '{"data":{"order_id":"A-1003","amount":"30.00","quantity":3}}'
+```
+
+The first time, the record is appended, with status `201 Created`:
+
+```json
+{"ledger":"orders","sequence":3,"created_at":"2026-11-06T23:18:37.825Z","data":{"amount":"30.00","order_id":"A-1003","quantity":3},"data_hash":"c537947d489bf2a1e01fa8de5ba517366164e4a713af6c25ec3786c87bdfad7e","previous_hash":"0990eb658ef02189095bf37575c55fe48798f3de399bc61a7447ad719f25d848","hash":"6ba7ad99b7f5b6ac5d41c64c0983a5fedc431cb3433269729dae03f3093cc13c"}
+```
+
+Sending the same request again appends nothing. The response is the same record, with status `200 OK`:
+
+```json
+{"ledger":"orders","sequence":3,"created_at":"2026-11-06T23:18:37.825Z","data":{"amount":"30.00","order_id":"A-1003","quantity":3},"data_hash":"c537947d489bf2a1e01fa8de5ba517366164e4a713af6c25ec3786c87bdfad7e","previous_hash":"0990eb658ef02189095bf37575c55fe48798f3de399bc61a7447ad719f25d848","hash":"6ba7ad99b7f5b6ac5d41c64c0983a5fedc431cb3433269729dae03f3093cc13c"}
+```
+
+Sending the same key with different `data` appends nothing and gets an error, with status `422 Unprocessable Entity`:
+
+```json
+{"type":"https://docs.stavewell.io/errors/idempotency-key-reused","title":"Idempotency key reused","status":422,"detail":"This idempotency key was already used in this ledger with different data, so nothing was appended.","request_id":"req_togdvey32pnppr2e4baxypek4p"}
+```
+
+A key is 1 to 128 letters, digits, hyphens and underscores, and it's case-sensitive. An ID from your own system, such as an order number, makes a good key. Stavewell remembers a key for as long as its record exists. Each key belongs to one ledger, and reading records doesn't return it. An append without the header always appends a new record.
 
 `api/openapi.yaml` describes every endpoint, parameter and error.
 

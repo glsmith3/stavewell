@@ -112,6 +112,9 @@ func parameterErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.
 			return
 		case errors.As(err, &format) && format.ParamName == "sequence":
 			detail = detailInvalidSequence
+		case errors.As(err, &format) && format.ParamName == "Idempotency-Key",
+			errors.As(err, &many) && many.ParamName == "Idempotency-Key":
+			detail = detailInvalidKey
 		}
 		writeProblem(w, r, problemInvalidRequest, detail)
 	}

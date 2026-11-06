@@ -102,6 +102,12 @@ func (e *env) fullKey(t *testing.T) string {
 // do sends a request with the key (if any) and returns the response.
 func (e *env) do(t *testing.T, method, path, key, body string) *http.Response {
 	t.Helper()
+	return e.doWith(t, method, path, key, body, nil)
+}
+
+// doWith is do with extra request headers.
+func (e *env) doWith(t *testing.T, method, path, key, body string, header map[string]string) *http.Response {
+	t.Helper()
 	var r io.Reader
 	if body != "" {
 		r = strings.NewReader(body)
@@ -115,6 +121,9 @@ func (e *env) do(t *testing.T, method, path, key, body string) *http.Response {
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -161,7 +170,8 @@ type specCase struct {
 	path       string
 	body       string
 	wantStatus int
-	wantType   string // for errors, the error type's name
+	wantType   string            // for errors, the error type's name
+	header     map[string]string // extra request headers
 }
 
 // createLedger creates a ledger through the store, for a key's organization.
@@ -203,56 +213,66 @@ func specCases() []specCase {
 		appendRecord(t, e, key, "orders", `{"order_id":"A-1001","amount":"12.50","quantity":2}`)
 		return key
 	}
+	keyed := map[string]string{"Idempotency-Key": "order-A-1001"}
+	withKeyedRecord := func(t *testing.T, e *env) string {
+		key := withOrders(t, e)
+		appendKeyedRecord(t, e, key, "orders", `{"order_id":"A-1001","amount":"12.50","quantity":2}`, "order-A-1001")
+		return key
+	}
 	big := `{"name":"orders","padding":"` + strings.Repeat("x", 64<<10) + `"}`
 	bigData := `{"data":{"padding":"` + strings.Repeat("x", 64<<10) + `"}}`
 	largeRecord := `{"data":{"padding":"` + strings.Repeat("x", 16<<10) + `"}}`
 	order := `{"data":{"order_id":"A-1001","amount":"12.50","quantity":2}}`
 	return []specCase{
-		{"health", none, "GET", "/health", "", 200, ""},
-		{"version", none, "GET", "/version", "", 200, ""},
-		{"create", full, "POST", "/v1/ledgers", `{"name":"orders"}`, 201, ""},
-		{"create with invalid JSON", full, "POST", "/v1/ledgers", `{"name":`, 400, "invalid-request"},
-		{"create with an invalid name", full, "POST", "/v1/ledgers", `{"name":"Orders"}`, 400, "invalid-request"},
-		{"create without a key", none, "POST", "/v1/ledgers", `{"name":"orders"}`, 401, "unauthorized"},
-		{"create with a read-only key", readOnly, "POST", "/v1/ledgers", `{"name":"orders"}`, 403, "insufficient-scope"},
-		{"create a duplicate", withOrders, "POST", "/v1/ledgers", `{"name":"orders"}`, 409, "ledger-already-exists"},
-		{"create past the limit", atLimit, "POST", "/v1/ledgers", `{"name":"one-more"}`, 409, "organization-limit-reached"},
-		{"create with a large body", full, "POST", "/v1/ledgers", big, 413, "request-too-large"},
-		{"list", withOrders, "GET", "/v1/ledgers", "", 200, ""},
-		{"list with limit 0", full, "GET", "/v1/ledgers?limit=0", "", 400, "invalid-request"},
-		{"list with a bad cursor", full, "GET", "/v1/ledgers?cursor=nope", "", 400, "invalid-cursor"},
-		{"list without a key", none, "GET", "/v1/ledgers", "", 401, "unauthorized"},
-		{"list with a write-only key", writeOnly, "GET", "/v1/ledgers", "", 403, "insufficient-scope"},
-		{"get", withOrders, "GET", "/v1/ledgers/orders", "", 200, ""},
-		{"get a missing ledger", full, "GET", "/v1/ledgers/missing", "", 404, "ledger-not-found"},
-		{"get without a key", none, "GET", "/v1/ledgers/orders", "", 401, "unauthorized"},
-		{"get with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders", "", 403, "insufficient-scope"},
-		{"get a ledger with records", withRecord, "GET", "/v1/ledgers/orders", "", 200, ""},
-		{"list ledgers with records", withRecord, "GET", "/v1/ledgers", "", 200, ""},
+		{"health", none, "GET", "/health", "", 200, "", nil},
+		{"version", none, "GET", "/version", "", 200, "", nil},
+		{"create", full, "POST", "/v1/ledgers", `{"name":"orders"}`, 201, "", nil},
+		{"create with invalid JSON", full, "POST", "/v1/ledgers", `{"name":`, 400, "invalid-request", nil},
+		{"create with an invalid name", full, "POST", "/v1/ledgers", `{"name":"Orders"}`, 400, "invalid-request", nil},
+		{"create without a key", none, "POST", "/v1/ledgers", `{"name":"orders"}`, 401, "unauthorized", nil},
+		{"create with a read-only key", readOnly, "POST", "/v1/ledgers", `{"name":"orders"}`, 403, "insufficient-scope", nil},
+		{"create a duplicate", withOrders, "POST", "/v1/ledgers", `{"name":"orders"}`, 409, "ledger-already-exists", nil},
+		{"create past the limit", atLimit, "POST", "/v1/ledgers", `{"name":"one-more"}`, 409, "organization-limit-reached", nil},
+		{"create with a large body", full, "POST", "/v1/ledgers", big, 413, "request-too-large", nil},
+		{"list", withOrders, "GET", "/v1/ledgers", "", 200, "", nil},
+		{"list with limit 0", full, "GET", "/v1/ledgers?limit=0", "", 400, "invalid-request", nil},
+		{"list with a bad cursor", full, "GET", "/v1/ledgers?cursor=nope", "", 400, "invalid-cursor", nil},
+		{"list without a key", none, "GET", "/v1/ledgers", "", 401, "unauthorized", nil},
+		{"list with a write-only key", writeOnly, "GET", "/v1/ledgers", "", 403, "insufficient-scope", nil},
+		{"get", withOrders, "GET", "/v1/ledgers/orders", "", 200, "", nil},
+		{"get a missing ledger", full, "GET", "/v1/ledgers/missing", "", 404, "ledger-not-found", nil},
+		{"get without a key", none, "GET", "/v1/ledgers/orders", "", 401, "unauthorized", nil},
+		{"get with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders", "", 403, "insufficient-scope", nil},
+		{"get a ledger with records", withRecord, "GET", "/v1/ledgers/orders", "", 200, "", nil},
+		{"list ledgers with records", withRecord, "GET", "/v1/ledgers", "", 200, "", nil},
 
-		{"append", withOrders, "POST", "/v1/ledgers/orders/records", order, 201, ""},
-		{"append to a ledger with records", withRecord, "POST", "/v1/ledgers/orders/records", order, 201, ""},
-		{"append with an extra field", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{},"extra":1}`, 400, "invalid-request"},
-		{"append a decimal number", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{"amount":12.5}}`, 400, "invalid-record-data"},
-		{"append without a key", none, "POST", "/v1/ledgers/orders/records", order, 401, "unauthorized"},
-		{"append with a read-only key", readOnly, "POST", "/v1/ledgers/orders/records", order, 403, "insufficient-scope"},
-		{"append to a missing ledger", full, "POST", "/v1/ledgers/missing/records", order, 404, "ledger-not-found"},
-		{"append a large record", withOrders, "POST", "/v1/ledgers/orders/records", largeRecord, 413, "record-too-large"},
-		{"append with a large body", withOrders, "POST", "/v1/ledgers/orders/records", bigData, 413, "request-too-large"},
-		{"list records", withRecord, "GET", "/v1/ledgers/orders/records", "", 200, ""},
-		{"list records of an empty ledger", withOrders, "GET", "/v1/ledgers/orders/records", "", 200, ""},
-		{"list records with limit 0", withOrders, "GET", "/v1/ledgers/orders/records?limit=0", "", 400, "invalid-request"},
-		{"list records with a bad cursor", withOrders, "GET", "/v1/ledgers/orders/records?cursor=nope", "", 400, "invalid-cursor"},
-		{"list records without a key", none, "GET", "/v1/ledgers/orders/records", "", 401, "unauthorized"},
-		{"list records with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records", "", 403, "insufficient-scope"},
-		{"list records of a missing ledger", full, "GET", "/v1/ledgers/missing/records", "", 404, "ledger-not-found"},
-		{"get a record", withRecord, "GET", "/v1/ledgers/orders/records/1", "", 200, ""},
-		{"get record 0", withRecord, "GET", "/v1/ledgers/orders/records/0", "", 400, "invalid-request"},
-		{"get a record by a non-number", withRecord, "GET", "/v1/ledgers/orders/records/first", "", 400, "invalid-request"},
-		{"get a record without a key", none, "GET", "/v1/ledgers/orders/records/1", "", 401, "unauthorized"},
-		{"get a record with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records/1", "", 403, "insufficient-scope"},
-		{"get a missing record", withRecord, "GET", "/v1/ledgers/orders/records/2", "", 404, "record-not-found"},
-		{"get a record from a missing ledger", full, "GET", "/v1/ledgers/missing/records/1", "", 404, "ledger-not-found"},
+		{"append", withOrders, "POST", "/v1/ledgers/orders/records", order, 201, "", nil},
+		{"append to a ledger with records", withRecord, "POST", "/v1/ledgers/orders/records", order, 201, "", nil},
+		{"append with an extra field", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{},"extra":1}`, 400, "invalid-request", nil},
+		{"append a decimal number", withOrders, "POST", "/v1/ledgers/orders/records", `{"data":{"amount":12.5}}`, 400, "invalid-record-data", nil},
+		{"append without a key", none, "POST", "/v1/ledgers/orders/records", order, 401, "unauthorized", nil},
+		{"append with a read-only key", readOnly, "POST", "/v1/ledgers/orders/records", order, 403, "insufficient-scope", nil},
+		{"append to a missing ledger", full, "POST", "/v1/ledgers/missing/records", order, 404, "ledger-not-found", nil},
+		{"append a large record", withOrders, "POST", "/v1/ledgers/orders/records", largeRecord, 413, "record-too-large", nil},
+		{"append with a large body", withOrders, "POST", "/v1/ledgers/orders/records", bigData, 413, "request-too-large", nil},
+		{"list records", withRecord, "GET", "/v1/ledgers/orders/records", "", 200, "", nil},
+		{"list records of an empty ledger", withOrders, "GET", "/v1/ledgers/orders/records", "", 200, "", nil},
+		{"list records with limit 0", withOrders, "GET", "/v1/ledgers/orders/records?limit=0", "", 400, "invalid-request", nil},
+		{"list records with a bad cursor", withOrders, "GET", "/v1/ledgers/orders/records?cursor=nope", "", 400, "invalid-cursor", nil},
+		{"list records without a key", none, "GET", "/v1/ledgers/orders/records", "", 401, "unauthorized", nil},
+		{"list records with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records", "", 403, "insufficient-scope", nil},
+		{"list records of a missing ledger", full, "GET", "/v1/ledgers/missing/records", "", 404, "ledger-not-found", nil},
+		{"get a record", withRecord, "GET", "/v1/ledgers/orders/records/1", "", 200, "", nil},
+		{"get record 0", withRecord, "GET", "/v1/ledgers/orders/records/0", "", 400, "invalid-request", nil},
+		{"get a record by a non-number", withRecord, "GET", "/v1/ledgers/orders/records/first", "", 400, "invalid-request", nil},
+		{"get a record without a key", none, "GET", "/v1/ledgers/orders/records/1", "", 401, "unauthorized", nil},
+		{"get a record with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/records/1", "", 403, "insufficient-scope", nil},
+		{"get a missing record", withRecord, "GET", "/v1/ledgers/orders/records/2", "", 404, "record-not-found", nil},
+		{"get a record from a missing ledger", full, "GET", "/v1/ledgers/missing/records/1", "", 404, "ledger-not-found", nil},
+		{"append with an idempotency key", withOrders, "POST", "/v1/ledgers/orders/records", order, 201, "", keyed},
+		{"repeat an append with an idempotency key", withKeyedRecord, "POST", "/v1/ledgers/orders/records", order, 200, "", keyed},
+		{"reuse an idempotency key with different data", withKeyedRecord, "POST", "/v1/ledgers/orders/records", `{"data":{"order_id":"A-1002"}}`, 422, "idempotency-key-reused", keyed},
+		{"append with an invalid idempotency key", withOrders, "POST", "/v1/ledgers/orders/records", order, 400, "invalid-request", map[string]string{"Idempotency-Key": "not valid"}},
 	}
 }
 
@@ -273,7 +293,7 @@ func TestResponsesMatchSpec(t *testing.T) {
 	for _, c := range specCases() {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
-			resp := e.do(t, c.method, c.path, c.setup(t, e), c.body)
+			resp := e.doWith(t, c.method, c.path, c.setup(t, e), c.body, c.header)
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				t.Fatal(err)

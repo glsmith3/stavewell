@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,12 @@ import (
 // appendRecord appends a record through the store, for a key's organization.
 func appendRecord(t *testing.T, e *env, key, ledger, data string) store.Record {
 	t.Helper()
+	return appendKeyedRecord(t, e, key, ledger, data, "")
+}
+
+// appendKeyedRecord is appendRecord with an idempotency key.
+func appendKeyedRecord(t *testing.T, e *env, key, ledger, data, idempotencyKey string) store.Record {
+	t.Helper()
 	p, err := e.db.Authenticate(context.Background(), key, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +38,7 @@ func appendRecord(t *testing.T, e *env, key, ledger, data string) store.Record {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := e.db.AppendRecord(context.Background(), p.OrgRowID, ledger, d, time.Now())
+	r, _, err := e.db.AppendRecord(context.Background(), p.OrgRowID, ledger, d, idempotencyKey, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,5 +543,193 @@ func TestRecordLogsHideData(t *testing.T) {
 	}
 	if logs := e.logs.String(); strings.Contains(logs, "secret") {
 		t.Errorf("the log contains record data:\n%s", logs)
+	}
+}
+
+// appendWithKey appends through the API with an Idempotency-Key header.
+func appendWithKey(t *testing.T, e *env, key, ledger, idempotencyKey, reqBody string) (*http.Response, []byte) {
+	t.Helper()
+	resp := e.doWith(t, "POST", "/v1/ledgers/"+ledger+"/records", key, reqBody, map[string]string{"Idempotency-Key": idempotencyKey})
+	b := body(t, resp)
+	resp.Body = io.NopCloser(strings.NewReader(string(b))) // so checkProblem can read it
+	return resp, b
+}
+
+func TestIdempotentAppend(t *testing.T) {
+	e := newEnv(t)
+	key := e.fullKey(t)
+	mustCreate(t, e, key, "orders")
+	mustCreate(t, e, key, "refunds")
+
+	resp, first := appendWithKey(t, e, key, "orders", "order-A-1001", `{"data":{"order_id":"A-1001","quantity":2}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first append: status %d: %s", resp.StatusCode, first)
+	}
+	// A repeat with the same data, written differently, returns the same
+	// record with 200 and appends nothing.
+	resp, again := appendWithKey(t, e, key, "orders", "order-A-1001", "{ \"data\" : { \"quantity\" : 2, \"order_id\" : \"A-1001\" } }")
+	if resp.StatusCode != http.StatusOK || string(again) != string(first) {
+		t.Errorf("repeat: status %d, body %s; want 200 and %s", resp.StatusCode, again, first)
+	}
+	// Different data gets an error and appends nothing.
+	resp, _ = appendWithKey(t, e, key, "orders", "order-A-1001", `{"data":{"order_id":"A-1002"}}`)
+	p := checkProblem(t, resp, "idempotency-key-reused", http.StatusUnprocessableEntity)
+	if !strings.Contains(p.Detail, "different data") {
+		t.Errorf("detail = %q", p.Detail)
+	}
+	var list recordList
+	decode(t, e.do(t, "GET", "/v1/ledgers/orders/records", key, ""), &list)
+	if fmt.Sprint(list.sequences()) != "[1]" {
+		t.Errorf("records = %v, want [1]", list.sequences())
+	}
+
+	// Keys are case-sensitive and belong to one ledger.
+	for _, c := range []struct{ ledger, idemKey string }{{"orders", "ORDER-A-1001"}, {"orders", "order-A-1002"}, {"refunds", "order-A-1001"}} {
+		if resp, b := appendWithKey(t, e, key, c.ledger, c.idemKey, `{"data":{"order_id":"A-1001","quantity":2}}`); resp.StatusCode != http.StatusCreated {
+			t.Errorf("key %s in %s: status %d: %s; want a new record", c.idemKey, c.ledger, resp.StatusCode, b)
+		}
+	}
+	// Without the header, every append is new.
+	mustAppend(t, e, key, "orders", `{"data":{"order_id":"A-1001","quantity":2}}`)
+	mustAppend(t, e, key, "orders", `{"data":{"order_id":"A-1001","quantity":2}}`)
+	decode(t, e.do(t, "GET", "/v1/ledgers/orders/records", key, ""), &list)
+	if fmt.Sprint(list.sequences()) != "[1 2 3 4 5]" {
+		t.Errorf("records = %v, want [1 2 3 4 5]", list.sequences())
+	}
+	checkRecords(t, list.Records)
+
+	// The key isn't part of the record, and reading doesn't return it.
+	for _, path := range []string{"/v1/ledgers/orders/records", "/v1/ledgers/orders/records/1"} {
+		if b := body(t, e.do(t, "GET", path, key, "")); strings.Contains(string(b), "order-A-1001") || strings.Contains(strings.ToLower(string(b)), "idempotency") {
+			t.Errorf("GET %s returns the key: %s", path, b)
+		}
+	}
+}
+
+func TestIdempotencyKeyFormat(t *testing.T) {
+	e := newEnv(t)
+	key := e.fullKey(t)
+	mustCreate(t, e, key, "orders")
+	for _, k := range []string{"", "a b", "a.b", "a%41", "a,b", "a;b", "ключ", strings.Repeat("k", 129)} {
+		resp, _ := appendWithKey(t, e, key, "orders", k, `{"data":{}}`)
+		p := checkProblem(t, resp, "invalid-request", http.StatusBadRequest)
+		if !strings.Contains(p.Detail, "Idempotency-Key") {
+			t.Errorf("key %q: detail = %q, want it to explain the key rule", k, p.Detail)
+		}
+	}
+	// Two headers.
+	req, _ := http.NewRequest("POST", e.srv.URL+"/v1/ledgers/orders/records", strings.NewReader(`{"data":{}}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Add("Idempotency-Key", "one")
+	req.Header.Add("Idempotency-Key", "two")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := checkProblem(t, resp, "invalid-request", http.StatusBadRequest)
+	resp.Body.Close()
+	if !strings.Contains(p.Detail, "Idempotency-Key") {
+		t.Errorf("two headers: detail = %q, want it to explain the key rule", p.Detail)
+	}
+	ledgerIsEmpty(t, e, key, "orders")
+
+	for _, k := range []string{"a", strings.Repeat("k", 128), "550e8400-e29b-41d4-a716-446655440000", "A_b-9"} {
+		if resp, b := appendWithKey(t, e, key, "orders", k, `{"data":{}}`); resp.StatusCode != http.StatusCreated {
+			t.Errorf("key %q: status %d: %s; want 201", k, resp.StatusCode, b)
+		}
+	}
+}
+
+// TestIdempotencyKeysAreIsolated checks that a key can't reach another
+// organization's records.
+func TestIdempotencyKeysAreIsolated(t *testing.T) {
+	e := newEnv(t)
+	keyA, keyB := e.fullKey(t), e.fullKey(t)
+	mustCreate(t, e, keyA, "orders")
+	if resp, b := appendWithKey(t, e, keyA, "orders", "shared-key", `{"data":{"owner":"a"}}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("A's append: status %d: %s", resp.StatusCode, b)
+	}
+	// B's repeat of A's append on A's ledger gets the same 404 as a missing
+	// ledger, not A's record.
+	resp, b := appendWithKey(t, e, keyB, "orders", "shared-key", `{"data":{"owner":"a"}}`)
+	if strings.Contains(string(b), `"owner":"a"`) {
+		t.Errorf("B got A's record: %s", b)
+	}
+	checkProblem(t, resp, "ledger-not-found", http.StatusNotFound)
+
+	// B's own ledger with the same name and key is separate.
+	mustCreate(t, e, keyB, "orders")
+	resp, b = appendWithKey(t, e, keyB, "orders", "shared-key", `{"data":{"owner":"a"}}`)
+	var r apiRecord
+	if err := json.Unmarshal(b, &r); err != nil || resp.StatusCode != http.StatusCreated || r.Sequence != 1 {
+		t.Errorf("B's append: status %d: %s; want a new record 1", resp.StatusCode, b)
+	}
+}
+
+func TestIdempotentAppendUnderConcurrency(t *testing.T) {
+	e := newEnv(t)
+	key := e.fullKey(t)
+	mustCreate(t, e, key, "orders")
+	const n = 20
+	statuses := make([]int, n)
+	bodies := make([]string, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			req, _ := http.NewRequest("POST", e.srv.URL+"/v1/ledgers/orders/records", strings.NewReader(`{"data":{"order_id":"A-1001"}}`))
+			req.Header.Set("Authorization", "Bearer "+key)
+			req.Header.Set("Idempotency-Key", "order-A-1001")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return // statuses[i] stays 0, which fails below
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			statuses[i], bodies[i] = resp.StatusCode, string(b)
+		})
+	}
+	wg.Wait()
+	created := 0
+	for i := range n {
+		switch statuses[i] {
+		case http.StatusCreated:
+			created++
+		case http.StatusOK:
+		default:
+			t.Errorf("request %d: status %d: %s", i, statuses[i], bodies[i])
+		}
+		if bodies[i] != bodies[0] {
+			t.Errorf("request %d got %s, request 0 got %s; want the same record", i, bodies[i], bodies[0])
+		}
+	}
+	if created != 1 {
+		t.Errorf("%d requests got 201, want 1", created)
+	}
+	var list recordList
+	decode(t, e.do(t, "GET", "/v1/ledgers/orders/records", key, ""), &list)
+	if len(list.Records) != 1 {
+		t.Errorf("the ledger has %d records, want 1", len(list.Records))
+	}
+}
+
+// TestIdempotencyKeysAreNotLogged checks that keys, valid or not, never
+// reach the log.
+func TestIdempotencyKeysAreNotLogged(t *testing.T) {
+	e := newEnv(t)
+	key := e.fullKey(t)
+	mustCreate(t, e, key, "orders")
+	for _, k := range []string{"secretkey-1", "secretkey 2", "secretkey%33"} {
+		req := httptest.NewRequest("POST", "/v1/ledgers/orders/records", strings.NewReader(`{"data":{}}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Idempotency-Key", k)
+		e.handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	req := httptest.NewRequest("POST", "/v1/ledgers/orders/records", strings.NewReader(`{"data":{}}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Add("Idempotency-Key", "secretkey-4")
+	req.Header.Add("Idempotency-Key", "secretkey-5")
+	e.handler.ServeHTTP(httptest.NewRecorder(), req)
+	if logs := e.logs.String(); strings.Contains(logs, "secretkey") {
+		t.Errorf("the log contains an idempotency key:\n%s", logs)
 	}
 }

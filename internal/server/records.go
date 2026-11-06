@@ -64,10 +64,21 @@ func (resp recordResponse) VisitGetRecordResponse(w http.ResponseWriter) error {
 
 // AppendRecord appends a record to one of the caller's organization's
 // ledgers. checkAppendBody has already checked the body.
+//
+// With an idempotency key that the ledger already has, it appends nothing:
+// it returns the earlier record with 200 if the data is the same, and an
+// idempotency-key-reused error otherwise.
 func (s *Server) AppendRecord(ctx context.Context, req api.AppendRecordRequestObject) (api.AppendRecordResponseObject, error) {
 	p, ok := principalFrom(ctx)
 	if !ok {
 		return nil, errNoPrincipal
+	}
+	var key string
+	if req.Params.IdempotencyKey != nil {
+		key = *req.Params.IdempotencyKey
+		if !store.ValidIdempotencyKey(key) {
+			return api.AppendRecord400ApplicationProblemPlusJSONResponse(newProblem(ctx, problemInvalidRequest, detailInvalidKey)), nil
+		}
 	}
 	if req.Body == nil {
 		return api.AppendRecord400ApplicationProblemPlusJSONResponse(newProblem(ctx, problemInvalidRequest, detailMissingData)), nil
@@ -87,12 +98,17 @@ func (s *Server) AppendRecord(ctx context.Context, req api.AppendRecordRequestOb
 	if !store.ValidLedgerName(req.Name) {
 		return notFound, nil // no ledger can have this name
 	}
-	r, err := s.db.AppendRecord(ctx, p.OrgRowID, req.Name, data, s.now())
-	if errors.Is(err, store.ErrNotFound) {
+	r, replayed, err := s.db.AppendRecord(ctx, p.OrgRowID, req.Name, data, key, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		return notFound, nil
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrIdempotencyKeyReused):
+		return api.AppendRecord422ApplicationProblemPlusJSONResponse(newProblem(ctx, problemKeyReused, detailKeyReused)), nil
+	case err != nil:
 		return nil, err
+	}
+	if replayed {
+		return recordResponse{http.StatusOK, recordJSON(r)}, nil
 	}
 	return recordResponse{http.StatusCreated, recordJSON(r)}, nil
 }

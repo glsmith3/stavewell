@@ -266,6 +266,13 @@ type ListRecordsParams struct {
 	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
+// AppendRecordParams defines parameters for AppendRecord.
+type AppendRecordParams struct {
+	// IdempotencyKey A key that makes retrying this append safe. See "Retrying appends"
+	// in the API description.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // CreateLedgerJSONRequestBody defines body for CreateLedger for application/json ContentType.
 type CreateLedgerJSONRequestBody = CreateLedgerRequest
 
@@ -291,7 +298,7 @@ type ServerInterface interface {
 	ListRecords(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params ListRecordsParams)
 	// AppendRecord Append a record
 	// (POST /v1/ledgers/{name}/records)
-	AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath)
+	AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params AppendRecordParams)
 	// GetRecord Get a record
 	// (GET /v1/ledgers/{name}/records/{sequence})
 	GetRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath, sequence int64)
@@ -479,8 +486,32 @@ func (siw *ServerInterfaceWrapper) AppendRecord(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AppendRecordParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.AppendRecord(w, r, name)
+		siw.Handler.AppendRecord(w, r, name, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1117,12 +1148,27 @@ func (response ListRecords500ApplicationProblemPlusJSONResponse) VisitListRecord
 }
 
 type AppendRecordRequestObject struct {
-	Name LedgerNamePath `json:"name"`
-	Body *AppendRecordJSONRequestBody
+	Name   LedgerNamePath `json:"name"`
+	Params AppendRecordParams
+	Body   *AppendRecordJSONRequestBody
 }
 
 type AppendRecordResponseObject interface {
 	VisitAppendRecordResponse(w http.ResponseWriter) error
+}
+
+type AppendRecord200JSONResponse Record
+
+func (response AppendRecord200JSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type AppendRecord201JSONResponse Record
@@ -1212,6 +1258,20 @@ func (response AppendRecord413ApplicationProblemPlusJSONResponse) VisitAppendRec
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AppendRecord422ApplicationProblemPlusJSONResponse Problem
+
+func (response AppendRecord422ApplicationProblemPlusJSONResponse) VisitAppendRecordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(422)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1573,10 +1633,11 @@ func (sh *strictHandler) ListRecords(w http.ResponseWriter, r *http.Request, nam
 }
 
 // AppendRecord operation middleware
-func (sh *strictHandler) AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath) {
+func (sh *strictHandler) AppendRecord(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params AppendRecordParams) {
 	var request AppendRecordRequestObject
 
 	request.Name = name
+	request.Params = params
 
 	var body AppendRecordJSONRequestBody
 	if err := runtime.BindJSONBody(r, &body); err != nil {

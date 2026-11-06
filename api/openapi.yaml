@@ -109,6 +109,31 @@ info:
 
     which is
     `7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a`.
+
+    ## Retrying appends
+
+    If an append times out or the connection fails, you can't tell whether
+    the record was appended. To retry safely, send an `Idempotency-Key`
+    header with the append, and send the same key with every retry:
+
+    ```
+    Idempotency-Key: order-A-1001
+    ```
+
+    - The first append with a key appends the record (201). Stavewell
+      remembers the key for as long as the record exists.
+    - An append with the same key and the same `data` appends nothing. Its
+      response is the original record (200). `data` counts as the same if
+      its canonical JSON is the same, so key order and spacing don't matter.
+    - An append with the same key and different `data` appends nothing and
+      gets an `idempotency-key-reused` error (422).
+
+    A key is 1 to 128 letters, digits, hyphens and underscores, and it's
+    case-sensitive. A UUID works, and so does an ID from your own system,
+    such as an order number. Each key belongs to one ledger: the same key
+    in another ledger is a separate append. Keys aren't part of the record
+    or its record hash, and reading records doesn't return them. An append
+    without the header always appends a new record.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
@@ -322,6 +347,17 @@ paths:
         record's `created_at` is never earlier than the previous record's.
       security:
         - apiKey: [ledger:write]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            A key that makes retrying this append safe. See "Retrying appends"
+            in the API description.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]{1,128}$"
+          example: order-A-1001
       requestBody:
         required: true
         description: |
@@ -337,6 +373,15 @@ paths:
                 amount: "12.50"
                 quantity: 2
       responses:
+        "200":
+          description: |
+            A record with this `Idempotency-Key` and the same `data` was
+            appended earlier, so nothing was appended. The response is that
+            record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Record"
         "201":
           description: The record was appended.
           content:
@@ -356,9 +401,10 @@ paths:
                 hash: 7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a
         "400":
           description: |
-            The request body isn't a JSON object with only the `data` field
-            (`invalid-request`), or `data` breaks one of the rules in "Record
-            data" (`invalid-record-data`).
+            The request body isn't a JSON object with only the `data` field,
+            or the `Idempotency-Key` header isn't 1 to 128 letters, digits,
+            hyphens and underscores (`invalid-request`). Or `data` breaks one
+            of the rules in "Record data" (`invalid-record-data`).
           content:
             application/problem+json:
               schema:
@@ -381,6 +427,15 @@ paths:
             The request body is larger than 64 KiB (`request-too-large`), or
             the canonical form of `data` is larger than 16 KiB
             (`record-too-large`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: |
+            A record with this `Idempotency-Key` was appended earlier with
+            different `data`, so nothing was appended. The error type is
+            `idempotency-key-reused`.
           content:
             application/problem+json:
               schema:
