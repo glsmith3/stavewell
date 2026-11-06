@@ -14,4 +14,4 @@ Not yet published.
 
 ## Maintainer
 
-[your name]
+[@glsmith3](https://github.com/glsmith3)
