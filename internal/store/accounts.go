@@ -87,7 +87,10 @@ func (p Principal) HasScope(scope string) bool {
 }
 
 // CheckName reports whether name is acceptable for an organization or API
-// key: 1 to 64 characters, with no control characters.
+// key: 1 to 64 characters, not starting or ending with a space, and with no
+// control, formatting or line-separator characters. Formatting characters
+// include invisible ones and ones that reverse the direction of text, which
+// could make a listing misleading.
 func CheckName(name string) error {
 	n := utf8.RuneCountInString(name)
 	switch {
@@ -97,10 +100,18 @@ func CheckName(name string) error {
 		return errors.New("name is empty")
 	case n > MaxNameLength:
 		return fmt.Errorf("name is longer than %d characters", MaxNameLength)
-	case strings.ContainsFunc(name, unicode.IsControl):
-		return errors.New("name contains a control character")
+	case strings.ContainsFunc(name, disallowedInName):
+		return errors.New("name contains a control, formatting or line-separator character")
+	case strings.TrimSpace(name) != name:
+		return errors.New("name can't start or end with a space")
 	}
 	return nil
+}
+
+// disallowedInName reports whether r is a control character (Cc), a
+// formatting character (Cf), or a line or paragraph separator (Zl, Zp).
+func disallowedInName(r rune) bool {
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp)
 }
 
 // CreateOrganization adds an organization.

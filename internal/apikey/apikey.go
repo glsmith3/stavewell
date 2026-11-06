@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"regexp"
 	"strings"
 )
 
@@ -66,6 +67,19 @@ func Valid(key string) bool {
 		}
 	}
 	return true
+}
+
+// keyLike matches all or part of an API key, in any letter case: the prefix
+// followed by at least 16 base32 characters.
+var keyLike = regexp.MustCompile(`(?i)sw_[a-z2-7]{16,}`)
+
+// LooksLikeKey reports whether s contains something that may be all or part
+// of an API key, even with other text around it, in a different letter case,
+// or cut short. Code that might repeat s in a message uses it to avoid
+// spreading a key. A short piece is still dangerous: a key missing only its
+// last character can be found in 32 guesses, and base32 isn't case-sensitive.
+func LooksLikeKey(s string) bool {
+	return keyLike.MatchString(s)
 }
 
 // Hash returns the SHA-256 hash of key, as 64 lowercase hexadecimal

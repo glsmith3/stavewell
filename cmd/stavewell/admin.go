@@ -42,6 +42,14 @@ const (
 // been printed.
 var errUsage = errors.New("usage")
 
+// errHelp means help was requested and the usage text has been printed.
+var errHelp = errors.New("help")
+
+// errKeyInArgs is the error for an argument that looks like it contains an
+// API key. Its message deliberately doesn't repeat the argument.
+var errKeyInArgs = errors.New("an argument looks like it contains an API key, so the command didn't run and the argument isn't shown. " +
+	"Admin commands never take a key itself: to revoke a key, use its key ID (key_…). If the key was exposed, revoke it")
+
 // command is the environment an admin command runs in.
 type command struct {
 	ctx    context.Context
@@ -56,7 +64,7 @@ type command struct {
 func runAdmin(c command, args []string) int {
 	err := dispatch(c, args)
 	switch {
-	case err == nil:
+	case err == nil, errors.Is(err, errHelp):
 		return exitOK
 	case errors.Is(err, errUsage):
 		return exitUsage
@@ -67,6 +75,18 @@ func runAdmin(c command, args []string) int {
 }
 
 func dispatch(c command, args []string) error {
+	// No admin command takes an API key, so an argument that looks like one
+	// is a mistake, such as a key pasted in place of a key ID. Refuse it
+	// before anything can repeat it in a message.
+	for _, arg := range args {
+		if apikey.LooksLikeKey(arg) {
+			return errKeyInArgs
+		}
+	}
+	if len(args) == 1 && isHelp(args[0]) {
+		fmt.Fprint(c.stdout, usage)
+		return errHelp
+	}
 	if len(args) < 2 {
 		return c.usageError("")
 	}
@@ -85,6 +105,15 @@ func dispatch(c command, args []string) error {
 	return c.usageError(fmt.Sprintf("unknown command %q", "admin "+args[0]+" "+args[1]))
 }
 
+// isHelp reports whether arg asks for help.
+func isHelp(arg string) bool {
+	switch arg {
+	case "help", "-h", "-help", "--help":
+		return true
+	}
+	return false
+}
+
 // usageError prints msg, if any, and the usage text, and returns errUsage.
 func (c command) usageError(msg string) error {
 	if msg != "" {
@@ -97,7 +126,10 @@ func (c command) usageError(msg string) error {
 // parse parses flags for the named command and rejects extra arguments.
 func (c command) parse(fs *flag.FlagSet, args []string) error {
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args); errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(c.stdout, usage)
+		return errHelp
+	} else if err != nil {
 		return c.usageError(fmt.Sprintf("%s: %v", fs.Name(), err))
 	}
 	if fs.NArg() > 0 {
@@ -270,10 +302,6 @@ func (c command) keyRevoke(args []string) error {
 	}
 	if err := c.required(fs, "key"); err != nil {
 		return err
-	}
-	if apikey.Valid(*keyID) {
-		// Someone passed the key itself. Don't echo it back.
-		return errors.New("--key takes the key ID (key_…), not the key itself")
 	}
 	db, err := c.open()
 	if err != nil {

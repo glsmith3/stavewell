@@ -62,6 +62,36 @@ func TestHash(t *testing.T) {
 	}
 }
 
+func TestLooksLikeKey(t *testing.T) {
+	key := apikey.Generate()
+	for _, s := range []string{
+		key,
+		key + " ",
+		"Bearer " + key,
+		"STAVEWELL_KEY=" + key,
+		strings.ToUpper(key),
+		key[:len(key)-1], // one character short
+		key[:3+16],       // the prefix and 16 characters
+		apikey.ExampleKey,
+	} {
+		if !apikey.LooksLikeKey(s) {
+			t.Errorf("LooksLikeKey(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{
+		"",
+		"key_abprqbbshjploerfcxoy6stzbw",
+		"org_ngztvgyskawogjffukqizkghrh",
+		"Local testing",
+		key[:3+15], // the prefix and only 15 characters
+		"sw_" + strings.Repeat("1", 52),
+	} {
+		if apikey.LooksLikeKey(s) {
+			t.Errorf("LooksLikeKey(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestValidScope(t *testing.T) {
 	for _, s := range []string{"ledger:read", "ledger:write"} {
 		if !apikey.ValidScope(s) {

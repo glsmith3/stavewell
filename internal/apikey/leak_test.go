@@ -38,12 +38,26 @@ func TestFindKeys(t *testing.T) {
 // TestNoKeysCommitted fails if any file in the repository contains something
 // shaped like an API key, other than the example key. GitHub's secret
 // scanning doesn't recognize Stavewell keys, so this check does it instead.
+//
+// go test caches a passing result until the test binary, the environment or
+// a file the test read changes. The list of tracked files comes from running
+// git, which go test can't see, so the test also reads git's index file:
+// adding or removing a tracked file changes the index, and with it the
+// cached result. CI also runs tests with -count=1, which never uses the
+// cache.
 func TestNoKeysCommitted(t *testing.T) {
 	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		t.Fatalf("finding the repository root (this test needs git): %v", err)
 	}
 	dir := strings.TrimSpace(string(root))
+	index, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-path", "index").Output()
+	if err != nil {
+		t.Fatalf("finding the git index: %v", err)
+	}
+	if _, err := os.ReadFile(strings.TrimSpace(string(index))); err != nil {
+		t.Fatalf("reading the git index: %v", err)
+	}
 	out, err := exec.Command("git", "-C", dir, "ls-files", "-z").Output()
 	if err != nil {
 		t.Fatalf("listing files: %v", err)
@@ -54,10 +68,17 @@ func TestNoKeysCommitted(t *testing.T) {
 	}
 	for _, name := range files {
 		path := filepath.Join(dir, string(name))
-		b, err := os.ReadFile(path)
+		info, err := os.Stat(path)
 		if os.IsNotExist(err) {
-			continue // deleted in the working tree but not yet committed
+			continue // deleted in the working tree, or a broken symlink
 		}
+		if err != nil {
+			t.Fatalf("checking %s: %v", name, err)
+		}
+		if info.IsDir() {
+			continue // a submodule, or a symlink to a directory
+		}
+		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)
 		}

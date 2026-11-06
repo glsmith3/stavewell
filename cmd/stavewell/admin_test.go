@@ -181,6 +181,65 @@ func TestAdminUsageErrors(t *testing.T) {
 	}
 }
 
+func TestAdminNeverRepeatsKeys(t *testing.T) {
+	db := newDBPath(t)
+	out, _, _ := admin(t, db, adminNow, "org", "create", "--name", "Test")
+	org := field(t, out, "ID")
+	key := apikey.Generate()
+	// Any of these pieces in the output would expose the key.
+	pieces := []string{key, key[3:19], strings.ToUpper(key[3:19])}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"revoke with the key", []string{"key", "revoke", "--key", key}},
+		{"revoke with a trailing space", []string{"key", "revoke", "--key", key + " "}},
+		{"revoke with Bearer in front", []string{"key", "revoke", "--key", "Bearer " + key}},
+		{"revoke without --key", []string{"key", "revoke", key}},
+		{"revoke with an uppercase key", []string{"key", "revoke", "--key", strings.ToUpper(key)}},
+		{"revoke with a key one character short", []string{"key", "revoke", "--key", key[:len(key)-1]}},
+		{"key list with the key as --org", []string{"key", "list", "--org", key}},
+		{"key create with the key as --org", []string{"key", "create", "--org", key, "--name", "k", "--scopes", "ledger:read"}},
+		{"key create with the key in --name", []string{"key", "create", "--org", org, "--name", "copy of " + key, "--scopes", "ledger:read"}},
+		{"org create with the key as --name", []string{"org", "create", "--name", key}},
+		{"the key as an unknown command", []string{key, "list"}},
+		{"the key as an unknown flag", []string{"org", "list", "--" + key}},
+	}
+	for _, tt := range tests {
+		out, errOut, code := admin(t, db, adminNow, tt.args...)
+		if code != exitError || !strings.Contains(errOut, "looks like it contains an API key") {
+			t.Errorf("%s: code %d, stderr %q; want %d and the API key message", tt.name, code, errOut, exitError)
+		}
+		for _, piece := range pieces {
+			if strings.Contains(out+errOut, piece) {
+				t.Errorf("%s: output contains part of the key", tt.name)
+			}
+		}
+	}
+	// Nothing was created.
+	if out, _, _ := admin(t, db, adminNow, "org", "list"); strings.Count(out, "org_") != 1 {
+		t.Errorf("org list after refused commands:\n%s", out)
+	}
+	if out, _, _ := admin(t, db, adminNow, "key", "list", "--org", org); !strings.Contains(out, "has no API keys") {
+		t.Errorf("key list after refused commands:\n%s", out)
+	}
+}
+
+func TestAdminHelp(t *testing.T) {
+	db := newDBPath(t)
+	for _, args := range [][]string{
+		{"help"}, {"--help"}, {"-h"},
+		{"org", "create", "--help"},
+		{"key", "create", "-h"},
+		{"key", "list", "--org", "org_x", "--help"},
+	} {
+		out, errOut, code := admin(t, db, adminNow, args...)
+		if code != exitOK || !strings.HasPrefix(out, "Usage:") || errOut != "" {
+			t.Errorf("admin %q = %d, stdout %q, stderr %q; want 0 and the usage on stdout", args, code, out, errOut)
+		}
+	}
+}
+
 func TestAdminErrors(t *testing.T) {
 	db := newDBPath(t)
 	out, _, _ := admin(t, db, adminNow, "org", "create", "--name", "Test")
@@ -194,7 +253,7 @@ func TestAdminErrors(t *testing.T) {
 	}{
 		{"empty name", []string{"org", "create", "--name", ""}, "--name is required"},
 		{"name too long", []string{"org", "create", "--name", strings.Repeat("a", 65)}, "longer than 64"},
-		{"name with a control character", []string{"org", "create", "--name", "a\tb"}, "control character"},
+		{"name with a control character", []string{"org", "create", "--name", "a\tb"}, "control, formatting"},
 		{"key for an unknown organization", []string{"key", "create", "--org", unknownOrg, "--name", "k", "--scopes", "ledger:read"}, "not found"},
 		{"unknown scope", []string{"key", "create", "--org", org, "--name", "k", "--scopes", "ledger:admin"}, "unknown scope"},
 		{"only commas for scopes", []string{"key", "create", "--org", org, "--name", "k", "--scopes", ","}, "at least one scope"},
@@ -202,7 +261,9 @@ func TestAdminErrors(t *testing.T) {
 		{"366 days", []string{"key", "create", "--org", org, "--name", "k", "--scopes", "ledger:read", "--expires-in-days", "366"}, "1 to 365 days"},
 		{"list keys of an unknown organization", []string{"key", "list", "--org", unknownOrg}, "not found"},
 		{"revoke an unknown key", []string{"key", "revoke", "--key", "key_aaaaaaaaaaaaaaaaaaaaaaaaaa"}, "not found"},
-		{"revoke with the key itself", []string{"key", "revoke", "--key", secret}, "not the key itself"},
+		{"revoke with the key itself", []string{"key", "revoke", "--key", secret}, "looks like it contains an API key"},
+		{"name with a right-to-left override", []string{"org", "create", "--name", "abc\u202edcba"}, "formatting"},
+		{"name with a trailing space", []string{"org", "create", "--name", "Test "}, "start or end with a space"},
 	}
 	for _, tt := range tests {
 		out, errOut, code := admin(t, db, adminNow, tt.args...)

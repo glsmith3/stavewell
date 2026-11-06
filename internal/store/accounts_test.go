@@ -44,7 +44,14 @@ func TestCreateAndListOrganizations(t *testing.T) {
 
 func TestCheckName(t *testing.T) {
 	good := []string{"a", "Northwind test", strings.Repeat("é", 64), "Test 01 – synthetic"}
-	bad := []string{"", strings.Repeat("a", 65), "tab\there", "new\nline", "nul\x00", "\x1b[31mred", "bad \xff utf-8"}
+	bad := []string{
+		"", strings.Repeat("a", 65), "tab\there", "new\nline", "nul\x00", "\x1b[31mred", "bad \xff utf-8",
+		"abc\u202edcba",    // right-to-left override
+		"zero\u200bwidth",  // zero-width space
+		"soft\u00adhyphen", // soft hyphen
+		"line\u2028sep",    // line separator
+		" leading", "trailing ", "   ", "nbsp\u00a0",
+	}
 	for _, name := range good {
 		if err := CheckName(name); err != nil {
 			t.Errorf("CheckName(%q) = %v, want nil", name, err)
