@@ -3,13 +3,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/glsmith3/stavewell/internal/api"
 	"github.com/glsmith3/stavewell/internal/buildinfo"
+	"github.com/glsmith3/stavewell/internal/ids"
 )
 
 // Server implements api.StrictServerInterface.
@@ -36,21 +40,31 @@ func Handler(logger *slog.Logger) http.Handler {
 		RequestErrorHandlerFunc:  requestErrorHandler(logger),
 		ResponseErrorHandlerFunc: responseErrorHandler(logger),
 	})
-	h := api.HandlerWithOptions(strict, api.StdHTTPServerOptions{
-		BaseRouter: http.NewServeMux(),
+	mux := http.NewServeMux()
+	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{
+		BaseRouter: mux,
 		// Parameter errors (for example, a malformed query parameter) use the
 		// same handler as other invalid requests.
 		ErrorHandlerFunc: requestErrorHandler(logger),
 	})
-	return logRequests(logger, secureHeaders(h))
+	return withRequestID(
+		logRequests(logger,
+			secureHeaders(
+				recoverPanics(logger,
+					routeProblems(mux)))))
 }
 
 // requestErrorHandler responds to an invalid request without revealing
 // internal details to the caller. The details are logged instead.
 func requestErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Warn("invalid request", "method", r.Method, "path", r.URL.Path, "error", err)
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		logger.Warn("invalid request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"request_id", requestID(r.Context()),
+			"error", err,
+		)
+		writeProblem(w, r, problemInvalidRequest, detailInvalidRequest)
 	}
 }
 
@@ -58,9 +72,121 @@ func requestErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Re
 // internal details to the caller. The details are logged instead.
 func responseErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Error("internal error", "method", r.Method, "path", r.URL.Path, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		logger.Error("internal error",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"request_id", requestID(r.Context()),
+			"error", err,
+		)
+		writeProblem(w, r, problemInternal, detailInternal)
 	}
+}
+
+// requestIDKey is the context key for the request ID.
+type requestIDKey struct{}
+
+// withRequestID gives every request a new random ID. Error responses include
+// it, and the request's log lines record it, so an error a caller sees can be
+// matched with the server log.
+func withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), requestIDKey{}, ids.New("req"))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requestID returns the request ID stored by withRequestID, or an empty
+// string if there isn't one.
+func requestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
+}
+
+// routeProblems serves requests through mux, but answers requests that match
+// no route with Problem Details responses. On its own, ServeMux answers them
+// in plain text.
+func routeProblems(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			// ServeHTTP, not h.ServeHTTP, so that path values are set.
+			mux.ServeHTTP(w, r)
+			return
+		}
+		// No route matched. Run the mux's own handler against a capture to
+		// learn whether this is a 404, a 405 (with its Allow header) or a
+		// redirect to a cleaned-up path.
+		c := &captureWriter{header: make(http.Header)}
+		h.ServeHTTP(c, r)
+		switch c.status {
+		case http.StatusNotFound:
+			writeProblem(w, r, problemNotFound, detailNotFound)
+		case http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", c.header.Get("Allow"))
+			writeProblem(w, r, problemMethodNotAllowed, detailMethodNotAllowed)
+		default:
+			// Anything else, such as a redirect, is passed on unchanged.
+			for k, v := range c.header {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(c.status)
+			_, _ = w.Write(c.body.Bytes())
+		}
+	})
+}
+
+// captureWriter records a response instead of sending it.
+type captureWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (c *captureWriter) Header() http.Header { return c.header }
+
+func (c *captureWriter) WriteHeader(code int) {
+	if c.status == 0 {
+		c.status = code
+	}
+}
+
+func (c *captureWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return c.body.Write(b)
+}
+
+// recoverPanics turns a panic in a handler into an internal-error response,
+// so the caller gets a Problem Details response rather than a dropped
+// connection. The panic and its stack trace are logged, never sent.
+//
+// If the response has already started, a Problem Details response can't be
+// sent, so the connection is aborted instead.
+func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v == http.ErrAbortHandler {
+				panic(v)
+			}
+			logger.Error("panic",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"request_id", requestID(r.Context()),
+				"panic", fmt.Sprint(v),
+				"stack", string(debug.Stack()),
+			)
+			if t, ok := w.(interface{ headerWritten() bool }); ok && t.headerWritten() {
+				panic(http.ErrAbortHandler)
+			}
+			writeProblem(w, r, problemInternal, detailInternal)
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // secureHeaders sets headers that every API response carries.
@@ -96,6 +222,12 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// headerWritten reports whether the response has started. recoverPanics uses
+// it to decide whether an error response can still be sent.
+func (r *statusRecorder) headerWritten() bool {
+	return r.wroteHeader
+}
+
 // Unwrap lets http.ResponseController reach the underlying ResponseWriter,
 // for features such as flushing and per-request deadlines.
 func (r *statusRecorder) Unwrap() http.ResponseWriter {
@@ -103,8 +235,8 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 }
 
 // logRequests logs one line per request. It logs only the method, path,
-// status and duration: never query strings, headers or bodies, which can
-// contain credentials.
+// status, duration and request ID: never query strings, headers or bodies,
+// which can contain credentials.
 func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -115,6 +247,7 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", requestID(r.Context()),
 		)
 	})
 }

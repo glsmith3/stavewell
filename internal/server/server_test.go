@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -172,29 +173,116 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
-func TestUnknownPathReturns404(t *testing.T) {
+// requestIDFormat is the format of request IDs in error responses.
+var requestIDFormat = regexp.MustCompile(`^req_[a-z2-7]{26}$`)
+
+// checkProblem checks that resp is a Problem Details error of the named type
+// and status, and that its body matches the spec's Problem schema. It returns
+// the decoded body.
+func checkProblem(t *testing.T, resp *http.Response, wantName string, wantStatus int) map[string]any {
+	t.Helper()
+	if resp.StatusCode != wantStatus {
+		t.Errorf("status = %d, want %d", resp.StatusCode, wantStatus)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("Content-Type = %q, want application/problem+json", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	var v any
+	if err := json.Unmarshal(body, &v); err != nil {
+		t.Fatalf("decoding body %q: %v", body, err)
+	}
+	schema := loadSpec(t).Components.Schemas["Problem"].Value
+	if err := schema.VisitJSON(v); err != nil {
+		t.Errorf("body doesn't match the Problem schema: %v\nbody: %s", err, body)
+	}
+	m, _ := v.(map[string]any)
+	if got, want := m["type"], "https://docs.stavewell.io/errors/"+wantName; got != want {
+		t.Errorf("type = %v, want %q", got, want)
+	}
+	if got := m["status"]; got != float64(wantStatus) {
+		t.Errorf("status field = %v, want %d", got, wantStatus)
+	}
+	if id, _ := m["request_id"].(string); !requestIDFormat.MatchString(id) {
+		t.Errorf("request_id = %q, want a match for %s", id, requestIDFormat)
+	}
+	return m
+}
+
+func TestUnknownPathReturnsProblem(t *testing.T) {
 	srv := newTestServer(t)
 	resp, err := http.Get(srv.URL + "/no-such-path")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
+	defer resp.Body.Close()
+	checkProblem(t, resp, "not-found", http.StatusNotFound)
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 }
 
-func TestWrongMethodReturns405(t *testing.T) {
+func TestWrongMethodReturnsProblem(t *testing.T) {
 	srv := newTestServer(t)
 	resp, err := http.Post(srv.URL+"/health", "application/json", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("status = %d, want 405", resp.StatusCode)
-	}
+	defer resp.Body.Close()
+	checkProblem(t, resp, "method-not-allowed", http.StatusMethodNotAllowed)
 	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, http.MethodGet) {
 		t.Errorf("Allow = %q, want it to include GET", allow)
+	}
+}
+
+// TestErrorRequestIDMatchesLog checks that the request ID in an error
+// response is the one the server logged for that request.
+func TestErrorRequestIDMatchesLog(t *testing.T) {
+	var logs bytes.Buffer
+	h := server.Handler(slog.New(slog.NewJSONHandler(&logs, nil)))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/no-such-path", nil))
+
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding body %q: %v", w.Body.String(), err)
+	}
+	var entry struct {
+		Status    int    `json:"status"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("decoding log line %q: %v", logs.String(), err)
+	}
+	if body.RequestID == "" || entry.RequestID != body.RequestID {
+		t.Errorf("logged request_id = %q, response request_id = %q; want the same, not empty", entry.RequestID, body.RequestID)
+	}
+	if entry.Status != http.StatusNotFound {
+		t.Errorf("logged status = %d, want 404", entry.Status)
+	}
+}
+
+func TestRequestIDsAreUnique(t *testing.T) {
+	h := server.Handler(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seen := make(map[string]bool)
+	for range 100 {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/no-such-path", nil))
+		var body struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decoding body %q: %v", w.Body.String(), err)
+		}
+		if seen[body.RequestID] {
+			t.Fatalf("request ID %q was used twice", body.RequestID)
+		}
+		seen[body.RequestID] = true
 	}
 }

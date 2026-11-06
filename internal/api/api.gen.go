@@ -37,6 +37,40 @@ type Health struct {
 // HealthStatus Always `ok` when the server responds.
 type HealthStatus string
 
+// Problem An error response, in the Problem Details format (RFC 9457).
+type Problem struct {
+	// Detail A sentence that explains this occurrence of the error.
+	//
+	// Examples: No endpoint matches this path.
+	Detail string `json:"detail"`
+
+	// RequestId An identifier for this request. The same identifier appears in the
+	// server log.
+	//
+	//
+	// Examples: req_k4vz2qn7hxwm3pt6rdyc5jbe2a
+	RequestId string `json:"request_id"`
+
+	// Status The HTTP status code of the response.
+	//
+	// Examples: 404
+	Status int `json:"status"`
+
+	// Title A short name for the error type. It's the same for every error of
+	// that type.
+	//
+	//
+	// Examples: Not found
+	Title string `json:"title"`
+
+	// Type A URL that identifies the error type. It never changes. The last
+	// part of the URL is the error type's name, for example `not-found`.
+	//
+	//
+	// Examples: https://docs.stavewell.io/errors/not-found
+	Type string `json:"type"`
+}
+
 // Version defines model for Version.
 type Version struct {
 	// Commit The source commit the server was built from. If the server was
@@ -54,6 +88,9 @@ type Version struct {
 	// Examples: v0.1.0, dev
 	Version string `json:"version"`
 }
+
+// InternalError An error response, in the Problem Details format (RFC 9457).
+type InternalError = Problem
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -228,6 +265,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	return m
 }
 
+type InternalErrorApplicationProblemPlusJSONResponse Problem
+
 type GetHealthRequestObject struct {
 }
 
@@ -249,6 +288,22 @@ func (response GetHealth200JSONResponse) VisitGetHealthResponse(w http.ResponseW
 	return err
 }
 
+type GetHealth500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response GetHealth500ApplicationProblemPlusJSONResponse) VisitGetHealthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetVersionRequestObject struct {
 }
 
@@ -266,6 +321,22 @@ func (response GetVersion200JSONResponse) VisitGetVersionResponse(w http.Respons
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetVersion500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response GetVersion500ApplicationProblemPlusJSONResponse) VisitGetVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
 	_, err := buf.WriteTo(w)
 	return err
 }
