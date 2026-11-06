@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func TestAppendRecord(t *testing.T) {
 
 	var appended []Record
 	for i, data := range []string{`{"b": 1, "a": "x"}`, `{}`, `{"n": [1, 2, 3]}`} {
-		r, err := s.AppendRecord(ctx, org, "orders", mustData(t, data), testNow.Add(time.Duration(i)*time.Second))
+		r, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, data), "", testNow.Add(time.Duration(i)*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,7 +133,7 @@ func TestListLedgersIncludesLatestRecord(t *testing.T) {
 	// Ledger a gets two records and ledger c one; b stays empty.
 	var latest = map[string]Record{}
 	for _, name := range []string{"a", "c", "a"} {
-		r, err := s.AppendRecord(ctx, org, name, mustData(t, `{}`), testNow)
+		r, _, err := s.AppendRecord(ctx, org, name, mustData(t, `{}`), "", testNow)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,12 +159,12 @@ func TestAppendRecordTimesNeverGoBackward(t *testing.T) {
 		t.Fatal(err)
 	}
 	later := testNow.Add(time.Hour)
-	first, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), later)
+	first, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), "", later)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The clock goes back an hour.
-	second, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), testNow)
+	second, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), "", testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func TestAppendRecordCountsUsage(t *testing.T) {
 		{`{ "bb" : 22 }`, day1}, // canonical size 9
 		{`{}`, day2},            // canonical size 2
 	} {
-		if _, err := s.AppendRecord(ctx, orgs[0], "orders", mustData(t, c.data), c.now); err != nil {
+		if _, _, err := s.AppendRecord(ctx, orgs[0], "orders", mustData(t, c.data), "", c.now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -232,7 +233,7 @@ func TestAppendRecordCountsUsage(t *testing.T) {
 	}
 
 	// A failed append counts nothing.
-	if _, err := s.AppendRecord(ctx, orgs[0], "missing", mustData(t, `{"a": 1}`), day2); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.AppendRecord(ctx, orgs[0], "missing", mustData(t, `{"a": 1}`), "", day2); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("appending to a missing ledger: err = %v, want ErrNotFound", err)
 	}
 	if again, againDays := usage(t, s, orgs[0]); again != stored || fmt.Sprint(againDays) != fmt.Sprint(days) {
@@ -251,12 +252,12 @@ func TestRecordsAreIsolated(t *testing.T) {
 	if _, err := s.CreateLedger(ctx, orgs[0], "orders", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendRecord(ctx, orgs[0], "orders", mustData(t, `{"owner": 0}`), testNow); err != nil {
+	if _, _, err := s.AppendRecord(ctx, orgs[0], "orders", mustData(t, `{"owner": 0}`), "", testNow); err != nil {
 		t.Fatal(err)
 	}
 
 	// The other organization can't reach the ledger at all.
-	if _, err := s.AppendRecord(ctx, orgs[1], "orders", mustData(t, `{}`), testNow); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.AppendRecord(ctx, orgs[1], "orders", mustData(t, `{}`), "", testNow); !errors.Is(err, ErrNotFound) {
 		t.Errorf("AppendRecord from another organization: err = %v, want ErrNotFound", err)
 	}
 	if _, err := s.GetRecord(ctx, orgs[1], "orders", 1); !errors.Is(err, ErrNotFound) {
@@ -270,7 +271,7 @@ func TestRecordsAreIsolated(t *testing.T) {
 	if _, err := s.CreateLedger(ctx, orgs[1], "orders", testNow); err != nil {
 		t.Fatal(err)
 	}
-	r, err := s.AppendRecord(ctx, orgs[1], "orders", mustData(t, `{"owner": 1}`), testNow)
+	r, _, err := s.AppendRecord(ctx, orgs[1], "orders", mustData(t, `{"owner": 1}`), "", testNow)
 	if err != nil || r.Sequence != 1 || r.PreviousHash != record.ZeroHash {
 		t.Errorf("first record in the other organization's ledger = %+v, %v; want record 1", r, err)
 	}
@@ -307,7 +308,7 @@ func TestAppendRecordUnderConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Go(func() {
-			_, errs[i] = s.AppendRecord(ctx, org, "orders", data[i], testNow)
+			_, _, errs[i] = s.AppendRecord(ctx, org, "orders", data[i], "", testNow)
 		})
 	}
 	wg.Wait()
@@ -341,7 +342,7 @@ func TestListRecords(t *testing.T) {
 	}
 
 	for i := range 5 {
-		if _, err := s.AppendRecord(ctx, org, "orders", mustData(t, fmt.Sprintf(`{"i": %d}`, i)), testNow); err != nil {
+		if _, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, fmt.Sprintf(`{"i": %d}`, i)), "", testNow); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -375,7 +376,7 @@ func TestListRecords(t *testing.T) {
 	if err != nil || len(records) != 0 || more {
 		t.Errorf("after the last record: %v, %v, %v; want nothing", records, more, err)
 	}
-	if _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), testNow); err != nil {
+	if _, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), "", testNow); err != nil {
 		t.Fatal(err)
 	}
 	records, _, err = s.ListRecords(ctx, org, "orders", 5, 100)
@@ -401,7 +402,7 @@ func TestGetRecordErrors(t *testing.T) {
 	if _, err := s.CreateLedger(ctx, org, "orders", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), testNow); err != nil {
+	if _, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), "", testNow); err != nil {
 		t.Fatal(err)
 	}
 	for _, seq := range []int64{0, -1, 2} {
@@ -421,10 +422,155 @@ func TestAppendRecordRejectsZeroData(t *testing.T) {
 	if _, err := s.CreateLedger(ctx, org, "orders", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendRecord(ctx, org, "orders", record.Data{}, testNow); err == nil {
+	if _, _, err := s.AppendRecord(ctx, org, "orders", record.Data{}, "", testNow); err == nil {
 		t.Error("appending the zero Data succeeded")
 	}
 	if records := allRecords(t, s, org, "orders"); len(records) != 0 {
 		t.Errorf("the ledger has %d records, want 0", len(records))
+	}
+}
+
+func TestAppendRecordIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTestStore(t)
+	orgs := newOrgs(t, s, 2)
+	for _, org := range orgs {
+		for _, name := range []string{"orders", "refunds"} {
+			if _, err := s.CreateLedger(ctx, org, name, testNow); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	org := orgs[0]
+
+	first, replayed, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{"a": 1, "b": 2}`), "order-1", testNow)
+	if err != nil || replayed || first.Sequence != 1 {
+		t.Fatalf("first append = %+v, %v, %v; want record 1, not replayed", first, replayed, err)
+	}
+	stored, days := usage(t, s, org)
+
+	// The same data, written differently, returns the first record and
+	// appends nothing, even later.
+	again, replayed, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{"b":2,"a":1}`), "order-1", testNow.Add(time.Hour))
+	if err != nil || !replayed || again != first {
+		t.Errorf("repeat = %+v, %v, %v; want the first record, replayed", again, replayed, err)
+	}
+	// Different data gets an error and appends nothing.
+	if _, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{"a": 1}`), "order-1", testNow); !errors.Is(err, ErrIdempotencyKeyReused) {
+		t.Errorf("reuse with different data: err = %v, want ErrIdempotencyKeyReused", err)
+	}
+	if records := allRecords(t, s, org, "orders"); len(records) != 1 {
+		t.Errorf("the ledger has %d records, want 1", len(records))
+	}
+	// Repeats count no usage.
+	if again, againDays := usage(t, s, org); again != stored || fmt.Sprint(againDays) != fmt.Sprint(days) {
+		t.Errorf("after repeats, usage = %d %v; want %d %v", again, againDays, stored, days)
+	}
+
+	// Keys are case-sensitive, and each belongs to one ledger.
+	for _, c := range []struct {
+		org          int64
+		ledger, key  string
+		wantSequence int64
+	}{
+		{org, "orders", "ORDER-1", 2},
+		{org, "orders", "order-2", 3},
+		{org, "refunds", "order-1", 1},
+		{orgs[1], "orders", "order-1", 1},
+	} {
+		r, replayed, err := s.AppendRecord(ctx, c.org, c.ledger, mustData(t, `{"a": 1, "b": 2}`), c.key, testNow)
+		if err != nil || replayed || r.Sequence != c.wantSequence {
+			t.Errorf("key %s in %s = record %d, %v, %v; want a new record %d", c.key, c.ledger, r.Sequence, replayed, err, c.wantSequence)
+		}
+	}
+
+	// Without a key, every append is new.
+	for want := int64(4); want <= 5; want++ {
+		if r, replayed, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{"a": 1, "b": 2}`), "", testNow); err != nil || replayed || r.Sequence != want {
+			t.Errorf("append without a key = record %d, %v, %v; want a new record %d", r.Sequence, replayed, err, want)
+		}
+	}
+	checkChain(t, allRecords(t, s, org, "orders"))
+}
+
+func TestAppendRecordRejectsInvalidIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTestStore(t)
+	org := newOrgs(t, s, 1)[0]
+	if _, err := s.CreateLedger(ctx, org, "orders", testNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"a b", "a.b", "a%41", "ключ", strings.Repeat("k", 129), "a\n"} {
+		if _, _, err := s.AppendRecord(ctx, org, "orders", mustData(t, `{}`), key, testNow); err == nil {
+			t.Errorf("AppendRecord with key %q succeeded", key)
+		}
+	}
+	if records := allRecords(t, s, org, "orders"); len(records) != 0 {
+		t.Errorf("the ledger has %d records, want 0", len(records))
+	}
+	for _, key := range []string{"a", strings.Repeat("k", 128), "550e8400-e29b-41d4-a716-446655440000", "A_b-9"} {
+		if !ValidIdempotencyKey(key) {
+			t.Errorf("ValidIdempotencyKey(%q) = false", key)
+		}
+	}
+}
+
+// TestAppendRecordIdempotencyKeyUnderConcurrency checks that repeats sent at
+// the same time append one record: the others get that record, or an error
+// if their data differs.
+func TestAppendRecordIdempotencyKeyUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTestStore(t)
+	org := newOrgs(t, s, 1)[0]
+	if _, err := s.CreateLedger(ctx, org, "orders", testNow); err != nil {
+		t.Fatal(err)
+	}
+	const n = 40
+	data := make([]record.Data, n)
+	for i := range n {
+		data[i] = mustData(t, fmt.Sprintf(`{"v": %d}`, i%2)) // two different values
+	}
+	type result struct {
+		r        Record
+		replayed bool
+		err      error
+	}
+	results := make([]result, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			r, replayed, err := s.AppendRecord(ctx, org, "orders", data[i], "same-key", testNow)
+			results[i] = result{r, replayed, err}
+		})
+	}
+	wg.Wait()
+
+	records := allRecords(t, s, org, "orders")
+	if len(records) != 1 {
+		t.Fatalf("the ledger has %d records, want 1", len(records))
+	}
+	created := 0
+	for i, res := range results {
+		sameData := data[i].Hash() == records[0].DataHash
+		switch {
+		case res.err == nil && !res.replayed:
+			created++
+			if res.r != records[0] {
+				t.Errorf("append %d created %+v, but the ledger has %+v", i, res.r, records[0])
+			}
+		case res.err == nil && res.replayed:
+			if !sameData || res.r != records[0] {
+				t.Errorf("append %d replayed %+v; want the stored record, and only for the same data", i, res.r)
+			}
+		case errors.Is(res.err, ErrIdempotencyKeyReused):
+			if sameData {
+				t.Errorf("append %d with the stored data got ErrIdempotencyKeyReused", i)
+			}
+		default:
+			t.Errorf("append %d: %v", i, res.err)
+		}
+	}
+	if created != 1 {
+		t.Errorf("%d appends created a record, want 1", created)
 	}
 }
