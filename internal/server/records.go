@@ -72,6 +72,9 @@ func (s *Server) AppendRecord(ctx context.Context, req api.AppendRecordRequestOb
 	if req.Body == nil {
 		return api.AppendRecord400ApplicationProblemPlusJSONResponse(newProblem(ctx, problemInvalidRequest, detailMissingData)), nil
 	}
+	// checkAppendBody has already checked data the same way, so through HTTP
+	// this never fails. It stays as a backstop, because the store accepts
+	// only a parsed record.Data. TestAppendRecordHandlerChecksData covers it.
 	data, err := record.ParseData(req.Body.Data)
 	if err != nil {
 		pe := dataProblem(err)

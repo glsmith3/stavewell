@@ -368,6 +368,14 @@ func TestRecordsAreIsolated(t *testing.T) {
 	if len(listA.Records) != 1 || string(listA.Records[0].Data) != `{"owner":"a"}` || len(listB.Records) != 1 || string(listB.Records[0].Data) != `{"owner":"b"}` {
 		t.Errorf("A's records = %+v, B's = %+v; want only their own", listA.Records, listB.Records)
 	}
+	// Each organization's record 1 is its own.
+	for key, want := range map[string]string{keyA: `{"owner":"a"}`, keyB: `{"owner":"b"}`} {
+		var r apiRecord
+		decode(t, e.do(t, "GET", "/v1/ledgers/orders/records/1", key, ""), &r)
+		if string(r.Data) != want {
+			t.Errorf("record 1 = %s, want the organization's own, %s", r.Data, want)
+		}
+	}
 
 	// A's cursor doesn't work for B, even on B's ledger with the same name.
 	checkProblem(t, e.do(t, "GET", "/v1/ledgers/orders/records?cursor="+url.QueryEscape(listA.NextCursor), keyB, ""), "invalid-cursor", http.StatusBadRequest)

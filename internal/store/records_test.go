@@ -275,9 +275,14 @@ func TestRecordsAreIsolated(t *testing.T) {
 		t.Errorf("first record in the other organization's ledger = %+v, %v; want record 1", r, err)
 	}
 	for i, org := range orgs {
+		want := fmt.Sprintf(`{"owner":%d}`, i)
 		records := allRecords(t, s, org, "orders")
-		if len(records) != 1 || records[0].Data != fmt.Sprintf(`{"owner":%d}`, i) {
+		if len(records) != 1 || records[0].Data != want {
 			t.Errorf("organization %d's records = %+v; want only its own", i, records)
+		}
+		// Each organization's record 1 is its own.
+		if r, err := s.GetRecord(ctx, org, "orders", 1); err != nil || r.Data != want {
+			t.Errorf("organization %d's record 1 = %+v, %v; want its own, %s", i, r, err, want)
 		}
 	}
 }
