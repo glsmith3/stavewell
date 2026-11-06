@@ -121,7 +121,8 @@ info:
     ```
 
     - The first append with a key appends the record (201). Stavewell
-      remembers the key for as long as the record exists.
+      stores the key with the record, and records are never deleted, so
+      the key keeps working.
     - An append with the same key and the same `data` appends nothing. Its
       response is the original record (200). `data` counts as the same if
       its canonical JSON is the same, so key order and spacing don't matter.

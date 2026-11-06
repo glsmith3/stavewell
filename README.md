@@ -263,7 +263,7 @@ Sending the same key with different `data` appends nothing and gets an error, wi
 {"type":"https://docs.stavewell.io/errors/idempotency-key-reused","title":"Idempotency key reused","status":422,"detail":"This idempotency key was already used in this ledger with different data, so nothing was appended.","request_id":"req_togdvey32pnppr2e4baxypek4p"}
 ```
 
-A key is 1 to 128 letters, digits, hyphens and underscores, and it's case-sensitive. An ID from your own system, such as an order number, makes a good key. Stavewell remembers a key for as long as its record exists. Each key belongs to one ledger, and reading records doesn't return it. An append without the header always appends a new record.
+A key is 1 to 128 letters, digits, hyphens and underscores, and it's case-sensitive. An ID from your own system, such as an order number, makes a good key. Stavewell stores a key with its record, and records are never deleted, so the key keeps working. Each key belongs to one ledger, and reading records doesn't return it. An append without the header always appends a new record.
 
 `api/openapi.yaml` describes every endpoint, parameter and error.
 

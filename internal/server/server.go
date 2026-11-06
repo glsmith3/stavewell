@@ -92,8 +92,8 @@ func logInvalid(logger *slog.Logger, r *http.Request, err error) {
 	)
 }
 
-// parameterErrorHandler responds to a path or query parameter that couldn't
-// be read, without revealing internal details to the caller.
+// parameterErrorHandler responds to a path, query or header parameter that
+// couldn't be read, without revealing internal details to the caller.
 func parameterErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		logInvalid(logger, r, err)

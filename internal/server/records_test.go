@@ -733,3 +733,35 @@ func TestIdempotencyKeysAreNotLogged(t *testing.T) {
 		t.Errorf("the log contains an idempotency key:\n%s", logs)
 	}
 }
+
+// TestIdempotencyKeyCheckOrder checks which error an append gets when the
+// Idempotency-Key header is invalid and something else is wrong too. The
+// key, scope and body are checked first, then the header, then the ledger.
+func TestIdempotencyKeyCheckOrder(t *testing.T) {
+	e := newEnv(t)
+	org := e.newOrg(t)
+	key := e.newKey(t, org, "ledger:read", "ledger:write")
+	readOnly := e.newKey(t, org, "ledger:read")
+	mustCreate(t, e, key, "orders")
+	bad := "not valid"
+	for _, c := range []struct {
+		name, apiKey, ledger, idemKey, body string
+		wantType                            string
+		wantStatus                          int
+		wantDetail                          string
+	}{
+		{"no API key", "", "orders", bad, `{"data":{}}`, "unauthorized", 401, ""},
+		{"read-only key", readOnly, "orders", bad, `{"data":{}}`, "insufficient-scope", 403, ""},
+		{"invalid body", key, "orders", bad, `{"data":{},"extra":1}`, "invalid-request", 400, "only the documented fields"},
+		{"invalid data", key, "orders", bad, `{"data":{"n":1.5}}`, "invalid-record-data", 400, "whole numbers"},
+		{"missing ledger", key, "missing", bad, `{"data":{}}`, "invalid-request", 400, "Idempotency-Key"},
+		{"missing ledger, valid key", key, "missing", "valid-key", `{"data":{}}`, "ledger-not-found", 404, ""},
+	} {
+		resp := e.doWith(t, "POST", "/v1/ledgers/"+c.ledger+"/records", c.apiKey, c.body, map[string]string{"Idempotency-Key": c.idemKey})
+		p := checkProblem(t, resp, c.wantType, c.wantStatus)
+		if !strings.Contains(p.Detail, c.wantDetail) {
+			t.Errorf("%s: detail = %q, want it to mention %q", c.name, p.Detail, c.wantDetail)
+		}
+	}
+	ledgerIsEmpty(t, e, key, "orders")
+}
