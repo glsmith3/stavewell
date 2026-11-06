@@ -70,14 +70,18 @@ func Valid(key string) bool {
 }
 
 // keyLike matches all or part of an API key, in any letter case: the prefix
-// followed by at least 16 base32 characters.
-var keyLike = regexp.MustCompile(`(?i)sw_[a-z2-7]{16,}`)
+// followed by at least 16 base32 characters, or at least 32 base32
+// characters in a row with no prefix at all. The prefix is the same in every
+// key, so the random characters alone are the secret. Public IDs have only 26
+// random characters, so they don't match.
+var keyLike = regexp.MustCompile(`(?i)sw_[a-z2-7]{16,}|[a-z2-7]{32,}`)
 
 // LooksLikeKey reports whether s contains something that may be all or part
 // of an API key, even with other text around it, in a different letter case,
-// or cut short. Code that might repeat s in a message uses it to avoid
-// spreading a key. A short piece is still dangerous: a key missing only its
-// last character can be found in 32 guesses, and base32 isn't case-sensitive.
+// without its prefix, or cut short. Code that might repeat s in a message
+// uses it to avoid spreading a key. A short piece is still dangerous: a key
+// missing only its last character can be found in 32 guesses, and base32
+// isn't case-sensitive.
 func LooksLikeKey(s string) bool {
 	return keyLike.MatchString(s)
 }

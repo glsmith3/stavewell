@@ -62,7 +62,7 @@ go generate ./...
 
 ## Organizations and API keys
 
-Stavewell has no sign-up. You create organizations and API keys with admin commands, run where the server's database is. They use the same `STAVEWELL_DB` setting as the server, and they work while the server is running. In this version, no API endpoint uses API keys.
+Stavewell has no sign-up. You create organizations and API keys with admin commands, run where the server's database is. They use the same `STAVEWELL_DB` setting as the server, and they work while the server is running. They don't create a database, so start the server once first. In this version, no API endpoint uses API keys.
 
 Create an organization:
 

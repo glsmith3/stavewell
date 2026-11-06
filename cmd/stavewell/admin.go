@@ -6,12 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/glsmith3/stavewell/internal/apikey"
+	"github.com/glsmith3/stavewell/internal/ids"
 	"github.com/glsmith3/stavewell/internal/store"
 )
 
@@ -169,9 +171,28 @@ func (c command) required(fs *flag.FlagSet, names ...string) error {
 	return nil
 }
 
-// open opens the database.
+// open opens the server's database. Unlike the server, admin commands never
+// create a database: a missing file usually means the wrong directory or
+// STAVEWELL_DB, and changes made to a new, empty database would never reach
+// the server.
 func (c command) open() (*store.Store, error) {
+	if _, err := os.Stat(c.dbPath); errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("no database at %s. Admin commands use the server's database: "+
+			"run them where the server's database is, or set STAVEWELL_DB to its path. The server creates the database when it first starts", c.dbPath)
+	} else if err != nil {
+		return nil, err
+	}
 	return store.Open(c.ctx, c.dbPath)
+}
+
+// checkID returns an error, which doesn't repeat id, unless id has the form
+// of a public ID with the given prefix. Checking the form first means that a
+// mistyped value is never repeated in a later error message.
+func checkID(flagName, prefix, kind, id string) error {
+	if ids.Valid(prefix, id) {
+		return nil
+	}
+	return fmt.Errorf("--%s isn't a valid %s ID: it should be %s_ followed by 26 lowercase letters and digits", flagName, kind, prefix)
 }
 
 func (c command) orgCreate(args []string) error {
@@ -239,6 +260,9 @@ func (c command) keyCreate(args []string) error {
 	if err := c.required(fs, "org", "name", "scopes"); err != nil {
 		return err
 	}
+	if err := checkID("org", "org", "organization", *org); err != nil {
+		return err
+	}
 	db, err := c.open()
 	if err != nil {
 		return err
@@ -285,6 +309,9 @@ func (c command) keyList(args []string) error {
 	if err := c.required(fs, "org"); err != nil {
 		return err
 	}
+	if err := checkID("org", "org", "organization", *org); err != nil {
+		return err
+	}
 	db, err := c.open()
 	if err != nil {
 		return err
@@ -322,6 +349,9 @@ func (c command) keyRevoke(args []string) error {
 		return err
 	}
 	if err := c.required(fs, "key"); err != nil {
+		return err
+	}
+	if err := checkID("key", "key", "key", *keyID); err != nil {
 		return err
 	}
 	db, err := c.open()

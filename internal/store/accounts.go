@@ -104,8 +104,21 @@ func CheckName(name string) error {
 		return errors.New("name contains a control, formatting or line-separator character")
 	case strings.TrimSpace(name) != name:
 		return errors.New("name can't start or end with a space")
+	case !strings.ContainsFunc(name, visible):
+		return errors.New("name needs at least one visible letter, digit, punctuation mark or symbol")
 	}
 	return nil
+}
+
+// visible reports whether r is a letter, digit, punctuation mark or symbol
+// that displays as something. A few such characters display as blank space:
+// the Hangul fillers and the blank Braille pattern.
+func visible(r rune) bool {
+	switch r {
+	case '\u115f', '\u1160', '\u3164', '\uffa0', '\u2800':
+		return false
+	}
+	return unicode.In(r, unicode.L, unicode.N, unicode.P, unicode.S)
 }
 
 // disallowedInName reports whether r is a control character (Cc), a

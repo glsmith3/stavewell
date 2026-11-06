@@ -51,6 +51,10 @@ func TestCheckName(t *testing.T) {
 		"soft\u00adhyphen", // soft hyphen
 		"line\u2028sep",    // line separator
 		" leading", "trailing ", "   ", "nbsp\u00a0",
+		"\u3164",       // Hangul filler, which displays as blank
+		"\u2800\u2800", // blank Braille patterns
+		"\u0301\u0301", // only combining accents
+		"\ufe0f",       // only a variation selector
 	}
 	for _, name := range good {
 		if err := CheckName(name); err != nil {

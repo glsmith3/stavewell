@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -37,8 +38,35 @@ func field(t *testing.T, output, label string) string {
 	return m[1]
 }
 
+// newDBPath creates an empty database in a temporary directory, as the
+// server does when it first starts, and returns its path.
 func newDBPath(t *testing.T) string {
-	return filepath.Join(t.TempDir(), "stavewell.db")
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stavewell.db")
+	s, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAdminRequiresExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "elsewhere.db")
+	for _, args := range [][]string{
+		{"org", "list"},
+		{"org", "create", "--name", "Test"},
+	} {
+		_, errOut, code := admin(t, path, adminNow, args...)
+		if code != exitError || !strings.Contains(errOut, "no database at "+path) {
+			t.Errorf("admin %q with no database = %d, stderr %q; want an error naming the path", args, code, errOut)
+		}
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("an admin command created a database at %s", path)
+	}
 }
 
 func TestAdminOrganizations(t *testing.T) {
@@ -204,6 +232,11 @@ func TestAdminNeverRepeatsKeys(t *testing.T) {
 		{"org create with the key as --name", []string{"org", "create", "--name", key}},
 		{"the key as an unknown command", []string{key, "list"}},
 		{"the key as an unknown flag", []string{"org", "list", "--" + key}},
+		{"revoke with the key but no prefix", []string{"key", "revoke", "--key", key[3:]}},
+		{"revoke with sw- in place of sw_", []string{"key", "revoke", "--key", "sw-" + key[3:]}},
+		{"revoke with an escaped underscore", []string{"key", "revoke", "--key", `sw\_` + key[3:]}},
+		{"org create with the key's characters as --name", []string{"org", "create", "--name", key[3:]}},
+		{"key list with the key's characters as --org", []string{"key", "list", "--org", strings.ToUpper(key[3:])}},
 	}
 	for _, tt := range tests {
 		out, errOut, code := admin(t, db, adminNow, tt.args...)
@@ -281,7 +314,7 @@ func TestAdminErrors(t *testing.T) {
 		want string // in stderr
 	}{
 		{"empty name", []string{"org", "create", "--name", ""}, "--name is required"},
-		{"name too long", []string{"org", "create", "--name", strings.Repeat("a", 65)}, "longer than 64"},
+		{"name too long", []string{"org", "create", "--name", strings.Repeat("a b", 22)}, "longer than 64"},
 		{"name with a control character", []string{"org", "create", "--name", "a\tb"}, "control, formatting"},
 		{"key for an unknown organization", []string{"key", "create", "--org", unknownOrg, "--name", "k", "--scopes", "ledger:read"}, "not found"},
 		{"unknown scope", []string{"key", "create", "--org", org, "--name", "k", "--scopes", "ledger:admin"}, "unknown scope"},
@@ -291,6 +324,11 @@ func TestAdminErrors(t *testing.T) {
 		{"list keys of an unknown organization", []string{"key", "list", "--org", unknownOrg}, "not found"},
 		{"revoke an unknown key", []string{"key", "revoke", "--key", "key_aaaaaaaaaaaaaaaaaaaaaaaaaa"}, "not found"},
 		{"revoke with the key itself", []string{"key", "revoke", "--key", secret}, "looks like it contains an API key"},
+		{"malformed organization ID", []string{"key", "list", "--org", "org_short"}, "isn't a valid organization ID"},
+		{"organization ID with a trailing space", []string{"key", "create", "--org", org + " ", "--name", "k", "--scopes", "ledger:read"}, "isn't a valid organization ID"},
+		{"key ID in place of an organization ID", []string{"key", "list", "--org", "key_aaaaaaaaaaaaaaaaaaaaaaaaaa"}, "isn't a valid organization ID"},
+		{"malformed key ID", []string{"key", "revoke", "--key", "key-1"}, "isn't a valid key ID"},
+		{"invisible name", []string{"org", "create", "--name", "\u3164"}, "visible"},
 		{"name with a right-to-left override", []string{"org", "create", "--name", "abc\u202edcba"}, "formatting"},
 		{"name with a trailing space", []string{"org", "create", "--name", "Test "}, "start or end with a space"},
 	}

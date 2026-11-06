@@ -73,6 +73,11 @@ func TestLooksLikeKey(t *testing.T) {
 		key[:len(key)-1], // one character short
 		key[:3+16],       // the prefix and 16 characters
 		apikey.ExampleKey,
+		key[3:],                           // no prefix
+		strings.ToUpper(key[3:]),          // no prefix, uppercase
+		"sw-" + key[3:],                   // wrong separator
+		`sw\_` + key[3:],                  // copied from escaped Markdown
+		"name " + key[3:3+32] + " suffix", // 32 characters, no prefix
 	} {
 		if !apikey.LooksLikeKey(s) {
 			t.Errorf("LooksLikeKey(%q) = false, want true", s)
@@ -85,6 +90,8 @@ func TestLooksLikeKey(t *testing.T) {
 		"Local testing",
 		key[:3+15], // the prefix and only 15 characters
 		"sw_" + strings.Repeat("1", 52),
+		key[3 : 3+31],               // 31 characters, no prefix
+		"Internationalization test", // a long word is under 32 letters
 	} {
 		if apikey.LooksLikeKey(s) {
 			t.Errorf("LooksLikeKey(%q) = true, want false", s)
