@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -57,6 +58,26 @@ type command struct {
 	stderr io.Writer
 	dbPath string
 	now    func() time.Time
+}
+
+// runCommand runs a command line other than the bare server command. args
+// are the arguments after the program name, at least one. It returns the
+// process exit code.
+func runCommand(c command, args []string) int {
+	switch {
+	case slices.ContainsFunc(args, apikey.LooksLikeKey):
+		// Checked here as well as in dispatch, so that no message repeats
+		// the argument, whichever command it was given to.
+		fmt.Fprintf(c.stderr, "stavewell: %v\n", errKeyInArgs)
+		return exitError
+	case args[0] == "admin":
+		return runAdmin(c, args[1:])
+	case isHelp(args[0]):
+		fmt.Fprint(c.stdout, usage)
+		return exitOK
+	}
+	_ = c.usageError(fmt.Sprintf("unknown command %q", args[0]))
+	return exitUsage
 }
 
 // runAdmin runs an admin command. args are the arguments after "admin". It

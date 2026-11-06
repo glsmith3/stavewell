@@ -10,17 +10,14 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 	"time"
 
-	"github.com/glsmith3/stavewell/internal/apikey"
 	"github.com/glsmith3/stavewell/internal/buildinfo"
 	"github.com/glsmith3/stavewell/internal/server"
 	"github.com/glsmith3/stavewell/internal/store"
@@ -64,19 +61,7 @@ func main() {
 	// With arguments, run an admin command instead of the server.
 	if args := os.Args[1:]; len(args) > 0 {
 		c := command{ctx: ctx, stdout: os.Stdout, stderr: os.Stderr, dbPath: cfg.dbPath, now: time.Now}
-		code := exitUsage
-		switch {
-		case slices.ContainsFunc(args, apikey.LooksLikeKey):
-			fmt.Fprintf(c.stderr, "stavewell: %v\n", errKeyInArgs)
-			code = exitError
-		case args[0] == "admin":
-			code = runAdmin(c, args[1:])
-		case isHelp(args[0]):
-			fmt.Fprint(c.stdout, usage)
-			code = exitOK
-		default:
-			_ = c.usageError(fmt.Sprintf("unknown command %q", args[0]))
-		}
+		code := runCommand(c, args)
 		stop()
 		os.Exit(code)
 	}

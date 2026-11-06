@@ -225,6 +225,35 @@ func TestAdminNeverRepeatsKeys(t *testing.T) {
 	}
 }
 
+func TestRunCommand(t *testing.T) {
+	db := newDBPath(t)
+	key := apikey.Generate()
+	tests := []struct {
+		args     []string
+		wantCode int
+		wantOut  string // in stdout
+		wantErr  string // in stderr
+	}{
+		{[]string{"help"}, exitOK, "Usage:", ""},
+		{[]string{"--help"}, exitOK, "Usage:", ""},
+		{[]string{"admin", "org", "list"}, exitOK, "No organizations.", ""},
+		{[]string{"serve"}, exitUsage, "", `unknown command "serve"`},
+		{[]string{key}, exitError, "", "looks like it contains an API key"},
+		{[]string{"admin", "key", "revoke", "--key", key}, exitError, "", "looks like it contains an API key"},
+	}
+	for _, tt := range tests {
+		var out, errOut bytes.Buffer
+		c := command{ctx: context.Background(), stdout: &out, stderr: &errOut, dbPath: db, now: func() time.Time { return adminNow }}
+		code := runCommand(c, tt.args)
+		if code != tt.wantCode || !strings.Contains(out.String(), tt.wantOut) || !strings.Contains(errOut.String(), tt.wantErr) {
+			t.Errorf("runCommand(%q) = %d, stdout %q, stderr %q", tt.args, code, out.String(), errOut.String())
+		}
+		if strings.Contains(out.String()+errOut.String(), key[3:19]) {
+			t.Errorf("runCommand(%q) repeated part of the key", tt.args[:1])
+		}
+	}
+}
+
 func TestAdminHelp(t *testing.T) {
 	db := newDBPath(t)
 	for _, args := range [][]string{
