@@ -42,6 +42,7 @@ var (
 const (
 	detailInvalidRequest    = "The request isn't valid."
 	detailInvalidJSON       = "The request body isn't valid JSON, or a field has the wrong type."
+	detailInvalidBody       = "The request body must be one JSON object with only the documented fields, each of the documented type."
 	detailInvalidParameter  = "A parameter isn't valid."
 	detailInvalidLimit      = "The limit parameter must be a whole number from 1 to 100."
 	detailInvalidCursor     = "This cursor didn't come from this list. Use the next_cursor from an earlier page of the same list."

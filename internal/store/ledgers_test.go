@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -91,6 +92,42 @@ func TestLedgerLimit(t *testing.T) {
 	// The limit is per organization.
 	if _, err := s.CreateLedger(ctx, orgs[1], "one-more", testNow); err != nil {
 		t.Errorf("another organization: %v", err)
+	}
+}
+
+// TestLedgerLimitUnderConcurrency checks that the limit holds when many
+// requests create ledgers at once. It depends on write transactions taking
+// the write lock when they begin.
+func TestLedgerLimitUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTestStore(t)
+	org := newOrgs(t, s, 1)[0]
+	const attempts = MaxLedgers + 50
+	errs := make([]error, attempts)
+	var wg sync.WaitGroup
+	for i := range attempts {
+		wg.Go(func() {
+			_, errs[i] = s.CreateLedger(ctx, org, fmt.Sprintf("l%d", i), testNow)
+		})
+	}
+	wg.Wait()
+	created, limited := 0, 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrLedgerLimit):
+			limited++
+		default:
+			t.Errorf("attempt %d: %v", i, err)
+		}
+	}
+	if created != MaxLedgers || limited != attempts-MaxLedgers {
+		t.Errorf("%d created and %d refused; want %d and %d", created, limited, MaxLedgers, attempts-MaxLedgers)
+	}
+	var count int
+	if err := s.read.QueryRow("SELECT count(*) FROM ledgers WHERE organization_id = ?", org).Scan(&count); err != nil || count != MaxLedgers {
+		t.Errorf("the organization has %d ledgers, %v; want %d", count, err, MaxLedgers)
 	}
 }
 

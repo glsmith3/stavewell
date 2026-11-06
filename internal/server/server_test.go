@@ -516,7 +516,7 @@ func (l ledgerList) names() []string {
 func TestCreateAndGetLedger(t *testing.T) {
 	e := newEnv(t)
 	key := e.fullKey(t)
-	resp := e.do(t, "POST", "/v1/ledgers", key, `{"name":"orders","ignored":true}`)
+	resp := e.do(t, "POST", "/v1/ledgers", key, `{"name":"orders"}`)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: status %d", resp.StatusCode)
 	}
@@ -667,7 +667,7 @@ func TestCreateLedgerValidation(t *testing.T) {
 			t.Errorf("%s: detail = %q, want it to explain the name rule", body, p.Detail)
 		}
 	}
-	for _, body := range []string{``, `not json`, `{"name":5}`, `["orders"]`} {
+	for _, body := range []string{``, `not json`, `{"name":5}`, `["orders"]`, `{"name":null}`} {
 		checkProblem(t, e.do(t, "POST", "/v1/ledgers", key, body), "invalid-request", http.StatusBadRequest)
 	}
 	var list ledgerList
@@ -680,18 +680,77 @@ func TestCreateLedgerValidation(t *testing.T) {
 func TestRequestBodyLimit(t *testing.T) {
 	e := newEnv(t)
 	key := e.fullKey(t)
-	// A body of exactly 64 KiB is accepted; one byte more isn't.
-	prefix, suffix := `{"name":"orders","padding":"`, `"}`
-	exact := prefix + strings.Repeat("x", 64<<10-len(prefix)-len(suffix)) + suffix
-	if len(exact) != 64<<10 {
-		t.Fatalf("test body is %d bytes", len(exact))
+	// A body of exactly 64 KiB is accepted; one byte more isn't. Whitespace
+	// pads the body, so it stays a valid JSON object.
+	pad := func(name string, size int, after bool) string {
+		obj := `{"name":"` + name + `"}`
+		if after {
+			return obj + strings.Repeat(" ", size-len(obj))
+		}
+		return `{"name":"` + name + `"` + strings.Repeat(" ", size-len(obj)) + `}`
 	}
-	if resp := e.do(t, "POST", "/v1/ledgers", key, exact); resp.StatusCode != http.StatusCreated {
-		t.Errorf("64 KiB body: status %d, want 201", resp.StatusCode)
+	for _, after := range []bool{false, true} {
+		name := fmt.Sprintf("exact-%v", after)
+		if body := pad(name, 64<<10, after); len(body) != 64<<10 {
+			t.Fatalf("test body is %d bytes", len(body))
+		}
+		if resp := e.do(t, "POST", "/v1/ledgers", key, pad(name, 64<<10, after)); resp.StatusCode != http.StatusCreated {
+			t.Errorf("64 KiB body, padding after the JSON %v: status %d, want 201", after, resp.StatusCode)
+		}
+		// Bytes after the JSON object count toward the limit too.
+		checkProblem(t, e.do(t, "POST", "/v1/ledgers", key, pad("over", 64<<10+1, after)), "request-too-large", http.StatusRequestEntityTooLarge)
+		checkProblem(t, e.do(t, "POST", "/v1/ledgers", key, pad("far-over", 70_000, after)), "request-too-large", http.StatusRequestEntityTooLarge)
 	}
-	over := prefix + strings.Repeat("x", 64<<10-len(prefix)-len(suffix)+1) + suffix
-	over = strings.Replace(over, "orders", "other1", 1)
-	checkProblem(t, e.do(t, "POST", "/v1/ledgers", key, over), "request-too-large", http.StatusRequestEntityTooLarge)
+	var list ledgerList
+	decode(t, e.do(t, "GET", "/v1/ledgers", key, ""), &list)
+	if strings.Join(list.names(), ",") != "exact-false,exact-true" {
+		t.Errorf("ledgers = %v, want only the two 64 KiB requests", list.names())
+	}
+}
+
+// TestRequestBodyIsStrict checks that a body is accepted only if it's one
+// JSON object with only the documented fields.
+func TestRequestBodyIsStrict(t *testing.T) {
+	e := newEnv(t)
+	key := e.fullKey(t)
+	for _, body := range []string{
+		`{"name":"trail"} garbage`,
+		`{"name":"one"}{"name":"two"}`,
+		`{"NAME":"upper"}`,
+		`{"Name":"title"}`,
+		`{"name":"first","name":"second"}`,
+		`{"name":"extra","ignored":true}`,
+		"{\"name\":\"bad-utf8-\xff\"}",
+		`["orders"]`,
+		`"orders"`,
+		`{"name":["orders"]}`,
+	} {
+		p := checkProblem(t, e.do(t, "POST", "/v1/ledgers", key, body), "invalid-request", http.StatusBadRequest)
+		if !strings.Contains(p.Detail, "only the documented fields") {
+			t.Errorf("%q: detail = %q, want it to explain the body rule", body, p.Detail)
+		}
+	}
+	var list ledgerList
+	decode(t, e.do(t, "GET", "/v1/ledgers", key, ""), &list)
+	if len(list.Ledgers) != 0 {
+		t.Errorf("rejected bodies created %v", list.names())
+	}
+
+	// Whitespace around the object is fine, and Content-Type isn't checked.
+	if resp := e.do(t, "POST", "/v1/ledgers", key, "  \n {\"name\":\"spaced\"} \n "); resp.StatusCode != http.StatusCreated {
+		t.Errorf("whitespace around the body: status %d, want 201", resp.StatusCode)
+	}
+	req, _ := http.NewRequest("POST", e.srv.URL+"/v1/ledgers", strings.NewReader(`{"name":"plain"}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Content-Type text/plain: status %d, want 201", resp.StatusCode)
+	}
 }
 
 func TestAuthentication(t *testing.T) {

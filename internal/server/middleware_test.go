@@ -325,7 +325,7 @@ func TestRoutePassesOnRedirects(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	route(mux, noAuth(t)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/a/../b", nil))
+	route(slog.New(slog.NewJSONHandler(io.Discard, nil)), mux, noAuth(t)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/a/../b", nil))
 
 	if w.Code != plain.Code {
 		t.Errorf("status = %d, want %d", w.Code, plain.Code)
@@ -396,6 +396,37 @@ func TestRequiredScopesMatchRoutes(t *testing.T) {
 			if strings.HasPrefix(path, "/v1/") != needsKey {
 				t.Errorf("%s: under /v1/ = %v, in requiredScopes = %v", pattern, strings.HasPrefix(path, "/v1/"), needsKey)
 			}
+		}
+	}
+}
+
+// TestJSONBodiesMatchSpec checks that every operation with a request body in
+// api/openapi.yaml has a strict body check in jsonBodies, and nothing else
+// does.
+func TestJSONBodiesMatchSpec(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBody := make(map[string]bool)
+	for path, item := range doc.Paths.Map() {
+		for method, op := range item.Operations() {
+			if op.RequestBody != nil {
+				withBody[method+" "+path] = true
+			}
+		}
+	}
+	if len(withBody) == 0 {
+		t.Fatal("no operation in the spec has a request body; the test isn't reading the spec")
+	}
+	for pattern := range withBody {
+		if jsonBodies[pattern] == nil {
+			t.Errorf("%s has a request body in the spec but no check in jsonBodies", pattern)
+		}
+	}
+	for pattern := range jsonBodies {
+		if !withBody[pattern] {
+			t.Errorf("jsonBodies has %s, which has no request body in the spec", pattern)
 		}
 	}
 }

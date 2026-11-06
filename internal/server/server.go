@@ -69,7 +69,7 @@ func withMiddleware(logger *slog.Logger, mux *http.ServeMux, auth authFunc) http
 		logRequests(logger,
 			secureHeaders(
 				recoverPanics(logger,
-					route(mux, auth)))))
+					route(logger, mux, auth)))))
 }
 
 // logPath returns the request's path for a log line. A path that looks like
@@ -178,10 +178,10 @@ func requestID(ctx context.Context) string {
 }
 
 // route serves requests through mux. For a route in requiredScopes, it first
-// checks the API key with auth. It limits every request body to maxBodyBytes.
-// It answers requests that match no route with Problem Details responses; on
-// its own, ServeMux answers them in plain text.
-func route(mux *http.ServeMux, auth authFunc) http.Handler {
+// checks the API key with auth. For a route in jsonBodies, it then reads and
+// checks the request body. It answers requests that match no route with
+// Problem Details responses; on its own, ServeMux answers them in plain text.
+func route(logger *slog.Logger, mux *http.ServeMux, auth authFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.RequestURI == "*" {
 			// "*" is a valid request target only for OPTIONS, which
@@ -199,7 +199,11 @@ func route(mux *http.ServeMux, auth authFunc) http.Handler {
 					return
 				}
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+			if check, ok := jsonBodies[pattern]; ok {
+				if r, ok = readBody(logger, w, r, check); !ok {
+					return
+				}
+			}
 			// ServeHTTP, not h.ServeHTTP, so that path values are set.
 			mux.ServeHTTP(w, r)
 			return

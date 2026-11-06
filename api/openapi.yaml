@@ -40,6 +40,14 @@ info:
     an `unauthorized` error (401). A request whose key doesn't have the
     endpoint's scope gets an `insufficient-scope` error (403).
 
+    ## Request bodies
+
+    A request body is one JSON object, up to 64 KiB, with only the fields the
+    endpoint documents. Field names are case-sensitive. A body with any other
+    field, a repeated field, a field of the wrong type, or anything after the
+    object gets an `invalid-request` error (400). A larger body gets a
+    `request-too-large` error (413). The `Content-Type` header isn't checked.
+
     ## Pages
 
     Endpoints that list items return them a page at a time, oldest first, with
@@ -113,8 +121,8 @@ paths:
       requestBody:
         required: true
         description: |
-          A JSON object. The request body can be up to 64 KiB. Fields other than
-          `name` are ignored.
+          A JSON object with only the `name` field, up to 64 KiB. See "Request
+          bodies" in the API description.
         content:
           application/json:
             schema:
@@ -133,8 +141,9 @@ paths:
                 created_at: "2026-11-06T19:22:31.123Z"
         "400":
           description: |
-            The request body isn't valid JSON, or the name isn't a valid ledger
-            name. The error type is `invalid-request`.
+            The request body isn't a JSON object with only the `name` field,
+            or the name isn't a valid ledger name. The error type is
+            `invalid-request`.
           content:
             application/problem+json:
               schema:
@@ -370,6 +379,7 @@ components:
       examples: [orders]
     CreateLedgerRequest:
       type: object
+      additionalProperties: false
       required: [name]
       properties:
         name:
