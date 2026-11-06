@@ -1,0 +1,78 @@
+openapi: 3.1.0
+info:
+  title: Stavewell API
+  version: 0.1.0-dev
+  description: |
+    The Stavewell HTTP API. All requests and responses use JSON.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development server
+tags:
+  - name: Server
+    description: Information about the running server.
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Server]
+      summary: Check server health
+      description: |
+        Returns `ok` when the server is running and able to respond. Use this
+        endpoint for uptime monitoring.
+      responses:
+        "200":
+          description: The server is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                status: ok
+  /version:
+    get:
+      operationId: getVersion
+      tags: [Server]
+      summary: Get the server version
+      description: |
+        Returns the Stavewell version that's running and the source commit it
+        was built from. Use the version to record which release you tested
+        against.
+      responses:
+        "200":
+          description: The version of the running server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Version"
+              example:
+                version: v0.1.0
+                commit: 3f2c9a1e8b7d6c5f4e3a2b1c0d9e8f7a6b5c4d3e
+components:
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: Always `ok` when the server responds.
+    Version:
+      type: object
+      additionalProperties: false
+      required: [version, commit]
+      properties:
+        version:
+          type: string
+          description: |
+            The Stavewell release, for example `v0.1.0`. Development builds
+            report `dev`.
+          examples: [v0.1.0, dev]
+        commit:
+          type: string
+          description: |
+            The source commit the server was built from. If the server was
+            built from uncommitted changes, `-modified` is appended. If the
+            commit isn't available, the value is `unknown`.
+          examples: [3f2c9a1e8b7d6c5f4e3a2b1c0d9e8f7a6b5c4d3e, unknown]
