@@ -3,8 +3,25 @@ info:
   title: Stavewell API
   version: 0.1.0-dev
   description: |
-    The Stavewell HTTP API. Successful responses use JSON. Error responses
-    are currently plain text.
+    The Stavewell HTTP API. Successful responses use JSON.
+
+    ## Errors
+
+    Error responses use the Problem Details format defined in RFC 9457, with
+    the content type `application/problem+json`. Every error has the same
+    five fields, described in the `Problem` schema: `type`, `title`, `status`,
+    `detail` and `request_id`.
+
+    Use `type` to tell errors apart. It's a URL that never changes, and its
+    last part is the error type's name. These error types can occur on any
+    request:
+
+    - `invalid-request` (400): the request isn't valid.
+    - `not-found` (404): no endpoint matches the request's path.
+    - `method-not-allowed` (405): the endpoint doesn't accept the request's
+      method. The `Allow` header lists the methods it accepts.
+    - `internal-error` (500): the server couldn't complete the request
+      because of a problem on the server.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
@@ -29,6 +46,8 @@ paths:
                 $ref: "#/components/schemas/Health"
               example:
                 status: ok
+        "500":
+          $ref: "#/components/responses/InternalError"
   /version:
     get:
       operationId: getVersion
@@ -48,8 +67,58 @@ paths:
               example:
                 version: v0.1.0
                 commit: 3f2c9a1e8b7d6c5f4e3a2b1c0d9e8f7a6b5c4d3e
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
+  responses:
+    InternalError:
+      description: |
+        The server couldn't complete the request because of a problem on the
+        server. The error type is `internal-error`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.stavewell.io/errors/internal-error
+            title: Internal error
+            status: 500
+            detail: The server couldn't complete the request.
+            request_id: req_k4vz2qn7hxwm3pt6rdyc5jbe2a
   schemas:
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, request_id]
+      description: An error response, in the Problem Details format (RFC 9457).
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            A URL that identifies the error type. It never changes. The last
+            part of the URL is the error type's name, for example `not-found`.
+          examples: [https://docs.stavewell.io/errors/not-found]
+        title:
+          type: string
+          description: |
+            A short name for the error type. It's the same for every error of
+            that type.
+          examples: [Not found]
+        status:
+          type: integer
+          description: The HTTP status code of the response.
+          examples: [404]
+        detail:
+          type: string
+          description: A sentence that explains this occurrence of the error.
+          examples: [No endpoint matches this path.]
+        request_id:
+          type: string
+          description: |
+            An identifier for this request. The same identifier appears in the
+            server log.
+          examples: [req_k4vz2qn7hxwm3pt6rdyc5jbe2a]
     Health:
       type: object
       additionalProperties: false
