@@ -50,8 +50,9 @@ var errHelp = errors.New("help")
 
 // errKeyInArgs is the error for an argument that looks like it contains an
 // API key. Its message deliberately doesn't repeat the argument.
-var errKeyInArgs = errors.New("an argument looks like it contains an API key, so the command didn't run and the argument isn't shown. " +
-	"Admin commands never take a key itself: to revoke a key, use its key ID (key_…). If the key was exposed, revoke it")
+var errKeyInArgs = errors.New("an argument looks like it contains an API key (or it has 32 or more letters and digits in a row), " +
+	"so the command didn't run and the argument isn't shown. " +
+	"Admin commands never take a key itself: to revoke a key, use its key ID (key_…). If a key was exposed, revoke it")
 
 // command is the environment an admin command runs in.
 type command struct {

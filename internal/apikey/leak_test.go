@@ -124,7 +124,13 @@ func TestNoKeysInHistory(t *testing.T) {
 	}
 	commits := 0
 	commit := ""
-	for line := range strings.Lines(git(t, dir, "log", "-p", "--no-color", "--no-ext-diff", "--format=commit %H", "HEAD")) {
+	// --text shows changes to files git treats as binary, and
+	// --diff-merges=first-parent shows what each merge commit changed,
+	// including anything added while resolving a conflict. --no-textconv
+	// and --no-ext-diff make sure the raw content is what's scanned.
+	log := git(t, dir, "log", "-p", "--text", "--diff-merges=first-parent", "--no-textconv",
+		"--no-color", "--no-ext-diff", "--format=commit %H", "HEAD")
+	for line := range strings.Lines(log) {
 		if c, ok := strings.CutPrefix(line, "commit "); ok {
 			commit = strings.TrimSpace(c)
 			commits++
