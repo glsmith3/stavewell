@@ -12,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/getkin/kin-openapi/openapi3"
+
 	"github.com/glsmith3/stavewell/internal/api"
+	"github.com/glsmith3/stavewell/internal/apikey"
 )
 
 func TestLogRequestsRecordsFirstStatus(t *testing.T) {
@@ -91,7 +94,8 @@ func TestErrorHandlersHideDetails(t *testing.T) {
 		wantStatus int
 		wantType   string
 	}{
-		{"request error", requestErrorHandler, http.StatusBadRequest, typeURLBase + "invalid-request"},
+		{"parameter error", parameterErrorHandler, http.StatusBadRequest, typeURLBase + "invalid-request"},
+		{"body error", bodyErrorHandler, http.StatusBadRequest, typeURLBase + "invalid-request"},
 		{"response error", responseErrorHandler, http.StatusInternalServerError, typeURLBase + "internal-error"},
 	}
 	for _, tt := range tests {
@@ -140,7 +144,7 @@ func TestMiddlewareTurnsPanicIntoProblem(t *testing.T) {
 	})
 	w := httptest.NewRecorder()
 
-	withMiddleware(logger, mux).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panic", nil))
+	withMiddleware(logger, mux, noAuth(t)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panic", nil))
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
@@ -300,7 +304,16 @@ func TestRecoverPanicsPassesOnAbortHandler(t *testing.T) {
 	t.Error("ServeHTTP returned normally, want a panic with http.ErrAbortHandler")
 }
 
-func TestRouteProblemsPassesOnRedirects(t *testing.T) {
+// noAuth returns an authFunc for routes that don't need an API key. It fails
+// the test if it's called.
+func noAuth(t *testing.T) authFunc {
+	return func(w http.ResponseWriter, r *http.Request, scope string) (*http.Request, bool) {
+		t.Errorf("auth called for %s %s, which needs no API key", r.Method, r.URL.Path)
+		return r, true
+	}
+}
+
+func TestRoutePassesOnRedirects(t *testing.T) {
 	// A path that needs cleaning matches no route, but ServeMux answers it
 	// with a redirect to the cleaned path. That redirect must reach the client
 	// unchanged.
@@ -312,12 +325,122 @@ func TestRouteProblemsPassesOnRedirects(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	routeProblems(mux).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/a/../b", nil))
+	route(slog.New(slog.NewJSONHandler(io.Discard, nil)), mux, noAuth(t)).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/a/../b", nil))
 
 	if w.Code != plain.Code {
 		t.Errorf("status = %d, want %d", w.Code, plain.Code)
 	}
 	if got, want := w.Header().Get("Location"), plain.Header().Get("Location"); got != want || got != "/b" {
 		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+// TestRequiredScopesMatchSpec checks requiredScopes against the security
+// requirements in api/openapi.yaml: every operation that needs an API key has
+// the same scope in both, and nothing else needs one.
+func TestRequiredScopesMatchSpec(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSpec := make(map[string]string)
+	for path, item := range doc.Paths.Map() {
+		for method, op := range item.Operations() {
+			if op.Security == nil || len(*op.Security) == 0 {
+				continue
+			}
+			reqs := *op.Security
+			if len(reqs) != 1 || len(reqs[0]) != 1 || len(reqs[0]["apiKey"]) != 1 {
+				t.Errorf("%s %s: want exactly one apiKey requirement with one scope, got %v", method, path, reqs)
+				continue
+			}
+			fromSpec[method+" "+path] = reqs[0]["apiKey"][0]
+		}
+	}
+	if len(fromSpec) == 0 {
+		t.Fatal("no operation in the spec needs an API key; the test isn't reading the spec")
+	}
+	for pattern, scope := range fromSpec {
+		if got := requiredScopes[pattern]; got != scope {
+			t.Errorf("%s: requiredScopes has %q, spec has %q", pattern, got, scope)
+		}
+	}
+	for pattern := range requiredScopes {
+		if _, ok := fromSpec[pattern]; !ok {
+			t.Errorf("requiredScopes has %s, which the spec doesn't list as needing an API key", pattern)
+		}
+	}
+}
+
+// TestRequiredScopesMatchRoutes checks that every route the generated code
+// registers under /v1/ is in requiredScopes, so none is left without a key
+// check.
+func TestRequiredScopesMatchRoutes(t *testing.T) {
+	mux := http.NewServeMux()
+	api.HandlerWithOptions(api.NewStrictHandler(&Server{}, nil), api.StdHTTPServerOptions{BaseRouter: mux})
+	doc, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, item := range doc.Paths.Map() {
+		for method := range item.Operations() {
+			// Build a request that matches the route, with a placeholder
+			// for any path parameter.
+			target := strings.NewReplacer("{name}", "x").Replace(path)
+			_, pattern := mux.Handler(httptest.NewRequest(method, target, nil))
+			if pattern == "" {
+				t.Errorf("%s %s isn't registered", method, path)
+				continue
+			}
+			_, needsKey := requiredScopes[pattern]
+			if strings.HasPrefix(path, "/v1/") != needsKey {
+				t.Errorf("%s: under /v1/ = %v, in requiredScopes = %v", pattern, strings.HasPrefix(path, "/v1/"), needsKey)
+			}
+		}
+	}
+}
+
+// TestJSONBodiesMatchSpec checks that every operation with a request body in
+// api/openapi.yaml has a strict body check in jsonBodies, and nothing else
+// does.
+func TestJSONBodiesMatchSpec(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBody := make(map[string]bool)
+	for path, item := range doc.Paths.Map() {
+		for method, op := range item.Operations() {
+			if op.RequestBody != nil {
+				withBody[method+" "+path] = true
+			}
+		}
+	}
+	if len(withBody) == 0 {
+		t.Fatal("no operation in the spec has a request body; the test isn't reading the spec")
+	}
+	for pattern := range withBody {
+		if jsonBodies[pattern] == nil {
+			t.Errorf("%s has a request body in the spec but no check in jsonBodies", pattern)
+		}
+	}
+	for pattern := range jsonBodies {
+		if !withBody[pattern] {
+			t.Errorf("jsonBodies has %s, which has no request body in the spec", pattern)
+		}
+	}
+}
+
+func TestLogPathHidesKeys(t *testing.T) {
+	key := apikey.Generate()
+	for _, path := range []string{"/v1/ledgers/" + key, "/v1/ledgers/" + key[3:]} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		if got := logPath(r); strings.Contains(got, key[3:19]) {
+			t.Errorf("logPath(%q) = %q, which contains part of the key", path, got)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/ledgers/orders", nil)
+	if got := logPath(r); got != "/v1/ledgers/orders" {
+		t.Errorf("logPath() = %q, want the path", got)
 	}
 }

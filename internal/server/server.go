@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,22 +13,31 @@ import (
 	"time"
 
 	"github.com/glsmith3/stavewell/internal/api"
+	"github.com/glsmith3/stavewell/internal/apikey"
 	"github.com/glsmith3/stavewell/internal/buildinfo"
 	"github.com/glsmith3/stavewell/internal/ids"
+	"github.com/glsmith3/stavewell/internal/store"
 )
 
-// Server implements api.StrictServerInterface.
-type Server struct{}
+// maxBodyBytes is the largest request body accepted: 64 KiB.
+const maxBodyBytes = 64 << 10
 
-var _ api.StrictServerInterface = Server{}
+// Server implements api.StrictServerInterface.
+type Server struct {
+	db     *store.Store
+	logger *slog.Logger
+	now    func() time.Time
+}
+
+var _ api.StrictServerInterface = (*Server)(nil)
 
 // GetHealth reports that the server is running.
-func (Server) GetHealth(context.Context, api.GetHealthRequestObject) (api.GetHealthResponseObject, error) {
+func (*Server) GetHealth(context.Context, api.GetHealthRequestObject) (api.GetHealthResponseObject, error) {
 	return api.GetHealth200JSONResponse{Status: api.Ok}, nil
 }
 
 // GetVersion reports the running version and source commit.
-func (Server) GetVersion(context.Context, api.GetVersionRequestObject) (api.GetVersionResponseObject, error) {
+func (*Server) GetVersion(context.Context, api.GetVersionRequestObject) (api.GetVersionResponseObject, error) {
 	return api.GetVersion200JSONResponse{
 		Version: buildinfo.Version,
 		Commit:  buildinfo.Commit(),
@@ -35,42 +45,87 @@ func (Server) GetVersion(context.Context, api.GetVersionRequestObject) (api.GetV
 }
 
 // Handler returns the HTTP handler for the API, with middleware applied.
-func Handler(logger *slog.Logger) http.Handler {
-	strict := api.NewStrictHandlerWithOptions(Server{}, nil, api.StrictHTTPServerOptions{
-		RequestErrorHandlerFunc:  requestErrorHandler(logger),
+func Handler(logger *slog.Logger, db *store.Store) http.Handler {
+	s := &Server{db: db, logger: logger, now: time.Now}
+	strict := api.NewStrictHandlerWithOptions(s, nil, api.StrictHTTPServerOptions{
+		RequestErrorHandlerFunc:  bodyErrorHandler(logger),
 		ResponseErrorHandlerFunc: responseErrorHandler(logger),
 	})
 	mux := http.NewServeMux()
 	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{
-		BaseRouter: mux,
-		// Parameter errors (for example, a malformed query parameter) use the
-		// same handler as other invalid requests.
-		ErrorHandlerFunc: requestErrorHandler(logger),
+		BaseRouter:       mux,
+		ErrorHandlerFunc: parameterErrorHandler(logger),
 	})
-	return withMiddleware(logger, mux)
+	return withMiddleware(logger, mux, s.authenticate)
 }
+
+// authFunc checks a request's API key for scope. See Server.authenticate.
+type authFunc func(w http.ResponseWriter, r *http.Request, scope string) (*http.Request, bool)
 
 // withMiddleware wraps mux in the middleware that every request passes
 // through, outermost first.
-func withMiddleware(logger *slog.Logger, mux *http.ServeMux) http.Handler {
+func withMiddleware(logger *slog.Logger, mux *http.ServeMux, auth authFunc) http.Handler {
 	return withRequestID(
 		logRequests(logger,
 			secureHeaders(
 				recoverPanics(logger,
-					routeProblems(mux)))))
+					route(logger, mux, auth)))))
 }
 
-// requestErrorHandler responds to an invalid request without revealing
-// internal details to the caller. The details are logged instead.
-func requestErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
+// logPath returns the request's path for a log line. A path that looks like
+// it contains an API key, such as one pasted into a URL by mistake, isn't
+// logged.
+func logPath(r *http.Request) string {
+	if apikey.LooksLikeKey(r.URL.Path) {
+		return "(not logged: looks like it contains an API key)"
+	}
+	return r.URL.Path
+}
+
+// logInvalid logs why a request was invalid. The details stay in the log.
+func logInvalid(logger *slog.Logger, r *http.Request, err error) {
+	logger.Warn("invalid request",
+		"method", r.Method,
+		"path", logPath(r),
+		"request_id", requestID(r.Context()),
+		"error", err,
+	)
+}
+
+// parameterErrorHandler responds to a path or query parameter that couldn't
+// be read, without revealing internal details to the caller.
+func parameterErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Warn("invalid request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"request_id", requestID(r.Context()),
-			"error", err,
-		)
-		writeProblem(w, r, problemInvalidRequest, detailInvalidRequest)
+		logInvalid(logger, r, err)
+		detail := detailInvalidParameter
+		var format *api.InvalidParamFormatError
+		var many *api.TooManyValuesForParamError
+		// The runtime library reports a repeated parameter as a format
+		// error, so both kinds are checked.
+		switch {
+		case errors.As(err, &format) && format.ParamName == "limit",
+			errors.As(err, &many) && many.ParamName == "limit":
+			detail = detailInvalidLimit
+		case errors.As(err, &format) && format.ParamName == "cursor",
+			errors.As(err, &many) && many.ParamName == "cursor":
+			writeProblem(w, r, problemInvalidCursor, detailInvalidCursor)
+			return
+		}
+		writeProblem(w, r, problemInvalidRequest, detail)
+	}
+}
+
+// bodyErrorHandler responds to a request body that couldn't be read, without
+// revealing internal details to the caller.
+func bodyErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		logInvalid(logger, r, err)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeProblem(w, r, problemRequestTooLarge, detailRequestTooLarge)
+			return
+		}
+		writeProblem(w, r, problemInvalidRequest, detailInvalidJSON)
 	}
 }
 
@@ -80,7 +135,7 @@ func responseErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.R
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		logger.Error("internal error",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", logPath(r),
 			"request_id", requestID(r.Context()),
 			"error", err,
 		)
@@ -88,30 +143,45 @@ func responseErrorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.R
 	}
 }
 
-// requestIDKey is the context key for the request ID.
-type requestIDKey struct{}
+// requestInfo holds what the request's log line needs from inner handlers.
+type requestInfo struct {
+	id    string // the request ID
+	keyID string // the API key's public ID, once the key is checked
+}
+
+// requestInfoKey is the context key for the request's *requestInfo.
+type requestInfoKey struct{}
 
 // withRequestID gives every request a new random ID. Error responses include
 // it, and the request's log lines record it, so an error a caller sees can be
 // matched with the server log.
 func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), requestIDKey{}, ids.New("req"))
+		ctx := context.WithValue(r.Context(), requestInfoKey{}, &requestInfo{id: ids.New("req")})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// infoFrom returns the request's *requestInfo, or nil if there isn't one.
+func infoFrom(ctx context.Context) *requestInfo {
+	info, _ := ctx.Value(requestInfoKey{}).(*requestInfo)
+	return info
 }
 
 // requestID returns the request ID stored by withRequestID, or an empty
 // string if there isn't one.
 func requestID(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDKey{}).(string)
-	return id
+	if info := infoFrom(ctx); info != nil {
+		return info.id
+	}
+	return ""
 }
 
-// routeProblems serves requests through mux, but answers requests that match
-// no route with Problem Details responses. On its own, ServeMux answers them
-// in plain text.
-func routeProblems(mux *http.ServeMux) http.Handler {
+// route serves requests through mux. For a route in requiredScopes, it first
+// checks the API key with auth. For a route in jsonBodies, it then reads and
+// checks the request body. It answers requests that match no route with
+// Problem Details responses; on its own, ServeMux answers them in plain text.
+func route(logger *slog.Logger, mux *http.ServeMux, auth authFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.RequestURI == "*" {
 			// "*" is a valid request target only for OPTIONS, which
@@ -124,6 +194,16 @@ func routeProblems(mux *http.ServeMux) http.Handler {
 		}
 		h, pattern := mux.Handler(r)
 		if pattern != "" {
+			if scope, ok := requiredScopes[pattern]; ok {
+				if r, ok = auth(w, r, scope); !ok {
+					return
+				}
+			}
+			if check, ok := jsonBodies[pattern]; ok {
+				if r, ok = readBody(logger, w, r, check); !ok {
+					return
+				}
+			}
 			// ServeHTTP, not h.ServeHTTP, so that path values are set.
 			mux.ServeHTTP(w, r)
 			return
@@ -190,7 +270,7 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 			}
 			logger.Error("panic",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", logPath(r),
 				"request_id", requestID(r.Context()),
 				"panic", fmt.Sprint(v),
 				"stack", string(debug.Stack()),
@@ -261,8 +341,9 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 }
 
 // logRequests logs one line per request. It logs only the method, path,
-// status, duration and request ID: never query strings, headers or bodies,
-// which can contain credentials.
+// status, duration, request ID and, once checked, the API key's public ID:
+// never query strings, headers, bodies or keys, which can contain
+// credentials.
 //
 // If the request is aborted by a panic, the line also has "aborted": true,
 // and the status is the one sent before the abort, or 0 if none was sent.
@@ -280,10 +361,13 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 			}
 			attrs := []any{
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", logPath(r),
 				"status", status,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"request_id", requestID(r.Context()),
+			}
+			if info := infoFrom(r.Context()); info != nil && info.keyID != "" {
+				attrs = append(attrs, "key_id", info.keyID)
 			}
 			if !completed {
 				attrs = append(attrs, "aborted", true)

@@ -28,7 +28,7 @@ Run the server:
 go run ./cmd/stavewell
 ```
 
-The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable. It currently provides two endpoints: `GET /health` and `GET /version`.
+The server listens on `127.0.0.1:8080`. To use a different address, set the `STAVEWELL_ADDR` environment variable. It provides `GET /health` and `GET /version`, which need no API key, and the ledger endpoints described under [Ledgers](#ledgers).
 
 The server keeps its data in an SQLite database file, `stavewell.db` in the current directory. To use a different file, set the `STAVEWELL_DB` environment variable. If the file doesn't exist, the server creates it, readable and writable only by your user account. SQLite also keeps two working files beside it, ending in `-wal` and `-shm`. When the server starts, it updates the database's structure to the version it needs, and it won't start if the database was created by a newer version of Stavewell.
 
@@ -62,7 +62,7 @@ go generate ./...
 
 ## Organizations and API keys
 
-Stavewell has no sign-up. You create organizations and API keys with admin commands, run where the server's database is. They use the same `STAVEWELL_DB` setting as the server, and they work while the server is running. They don't create a database, so start the server once first. In this version, no API endpoint uses API keys.
+Stavewell has no sign-up. You create organizations and API keys with admin commands, run where the server's database is. They use the same `STAVEWELL_DB` setting as the server, and they work while the server is running. They don't create a database, so start the server once first.
 
 Create an organization:
 
@@ -108,6 +108,53 @@ To see every command, run:
 ```bash
 go run ./cmd/stavewell help
 ```
+
+## Ledgers
+
+A ledger is a named, append-only sequence of records in your organization. In this version, you can create, list and get ledgers. Every endpoint under `/v1/` needs an API key, sent as `Authorization: Bearer KEY`. Run these commands with your own key in place of the placeholder.
+
+Create a ledger. It needs the `ledger:write` scope:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/ledgers \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"orders"}'
+```
+
+```json
+{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}
+```
+
+A ledger name is 1 to 64 lowercase letters, digits and hyphens, starting with a letter. It's unique within your organization and never changes. An organization can have up to 100 ledgers.
+
+List your ledgers, or get one by name. Both need the `ledger:read` scope:
+
+```bash
+curl http://127.0.0.1:8080/v1/ledgers \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey"
+```
+
+```json
+{"ledgers":[{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}],"next_cursor":"eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfZ2MyZG1sbWZleTM0Nmt3aWU1Z2U1cmI2emkiLCJhIjoib3JkZXJzIn0","has_more":false}
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/ledgers/orders \
+  -H "Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey"
+```
+
+```json
+{"name":"orders","created_at":"2026-11-06T22:08:21.313Z"}
+```
+
+The list returns up to 100 ledgers, or fewer if you set `limit`. To get the next page, pass `next_cursor` as the `cursor` parameter. A request without a valid key gets a `401` error:
+
+```json
+{"type":"https://docs.stavewell.io/errors/unauthorized","title":"Unauthorized","status":401,"detail":"This request needs a valid API key in the Authorization header.","request_id":"req_kjq2rgm2dekgl2nrp4hk6phihq"}
+```
+
+`api/openapi.yaml` describes every endpoint, parameter and error.
 
 ## Maintainer
 

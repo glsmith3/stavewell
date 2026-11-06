@@ -22,12 +22,50 @@ info:
       method. The `Allow` header lists the methods it accepts.
     - `internal-error` (500): the server couldn't complete the request
       because of a problem on the server.
+
+    Each endpoint lists the other error types it can return.
+
+    ## API keys
+
+    Every endpoint under `/v1/` needs an API key, sent in the `Authorization`
+    header:
+
+    ```
+    Authorization: Bearer sw_exampleexampleexampleexampleexampleexampleexamplekey
+    ```
+
+    An API key belongs to one organization, and an endpoint works only with
+    that organization's data. Each endpoint needs a scope, which it lists. A
+    request whose key is missing, malformed, unknown, expired or revoked gets
+    an `unauthorized` error (401). A request whose key doesn't have the
+    endpoint's scope gets an `insufficient-scope` error (403).
+
+    ## Request bodies
+
+    A request body is one JSON object, up to 64 KiB, with only the fields the
+    endpoint documents. Field names are case-sensitive. A body with any other
+    field, a repeated field, a field of the wrong type, or anything after the
+    object gets an `invalid-request` error (400). A larger body gets a
+    `request-too-large` error (413). The `Content-Type` header isn't checked.
+
+    ## Pages
+
+    Endpoints that list items return them a page at a time, oldest first, with
+    `next_cursor` and `has_more`. To get the next page, pass `next_cursor` as
+    the `cursor` parameter. `next_cursor` is present even on the last page:
+    using it later returns only items added since. Cursors don't expire, and
+    a cursor works only with the list it came from. Don't parse or build
+    cursors: their contents can change.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
 tags:
   - name: Server
     description: Information about the running server.
+  - name: Ledgers
+    description: |
+      Ledgers in your organization. A ledger is a named, append-only sequence
+      of records.
 paths:
   /health:
     get:
@@ -69,8 +107,216 @@ paths:
                 commit: 3f2c9a1e8b7d6c5f4e3a2b1c0d9e8f7a6b5c4d3e
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/ledgers:
+    post:
+      operationId: createLedger
+      tags: [Ledgers]
+      summary: Create a ledger
+      description: |
+        Creates an empty ledger in your organization. An organization can have
+        up to 100 ledgers. A ledger's name never changes, and a ledger can't be
+        deleted.
+      security:
+        - apiKey: [ledger:write]
+      requestBody:
+        required: true
+        description: |
+          A JSON object with only the `name` field, up to 64 KiB. See "Request
+          bodies" in the API description.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLedgerRequest"
+            example:
+              name: orders
+      responses:
+        "201":
+          description: The ledger was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ledger"
+              example:
+                name: orders
+                created_at: "2026-11-06T19:22:31.123Z"
+        "400":
+          description: |
+            The request body isn't a JSON object with only the `name` field,
+            or the name isn't a valid ledger name. The error type is
+            `invalid-request`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          description: |
+            A ledger with this name already exists in your organization
+            (`ledger-already-exists`), or your organization already has 100
+            ledgers (`organization-limit-reached`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listLedgers
+      tags: [Ledgers]
+      summary: List ledgers
+      description: |
+        Lists your organization's ledgers, a page at a time, in the order they
+        were created.
+      security:
+        - apiKey: [ledger:read]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of ledgers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LedgerList"
+              example:
+                ledgers:
+                  - name: orders
+                    created_at: "2026-11-06T19:22:31.123Z"
+                next_cursor: eyJ2IjoxLCJsIjoibGVkZ2VycyIsIm8iOiJvcmdfZ2MyZG1sbWZleTM0Nmt3aWU1Z2U1cmI2emkiLCJhIjoib3JkZXJzIn0
+                has_more: false
+        "400":
+          description: |
+            The `limit` parameter isn't a whole number from 1 to 100
+            (`invalid-request`), or the cursor didn't come from this list
+            (`invalid-cursor`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/ledgers/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: The ledger's name.
+        schema:
+          $ref: "#/components/schemas/LedgerName"
+    get:
+      operationId: getLedger
+      tags: [Ledgers]
+      summary: Get a ledger
+      description: Returns one of your organization's ledgers.
+      security:
+        - apiKey: [ledger:read]
+      responses:
+        "200":
+          description: The ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ledger"
+              example:
+                name: orders
+                created_at: "2026-11-06T19:22:31.123Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: |
+            Your organization has no ledger with this name. The error type is
+            `ledger-not-found`. A ledger in another organization gets the same
+            error.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        An API key, for example
+        `sw_exampleexampleexampleexampleexampleexampleexamplekey`.
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: The most items to return, from 1 to 100. The default is 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Where the page starts: the `next_cursor` from an earlier page of the
+        same list. Without it, the list starts at the beginning.
+      schema:
+        type: string
   responses:
+    Unauthorized:
+      description: |
+        The API key is missing, malformed, unknown, expired or revoked. The
+        error type is `unauthorized`.
+      headers:
+        WWW-Authenticate:
+          description: Always `Bearer`.
+          schema:
+            type: string
+            enum: [Bearer]
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.stavewell.io/errors/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: This request needs a valid API key in the Authorization header.
+            request_id: req_k4vz2qn7hxwm3pt6rdyc5jbe2a
+    InsufficientScope:
+      description: |
+        The API key doesn't have the scope this endpoint needs. The error type
+        is `insufficient-scope`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.stavewell.io/errors/insufficient-scope
+            title: Insufficient scope
+            status: 403
+            detail: This API key doesn't have the ledger:write scope.
+            request_id: req_k4vz2qn7hxwm3pt6rdyc5jbe2a
+    RequestTooLarge:
+      description: |
+        The request body is larger than 64 KiB. The error type is
+        `request-too-large`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
     InternalError:
       description: |
         The server couldn't complete the request because of a problem on the
@@ -93,6 +339,7 @@ components:
       description: An error response, in the Problem Details format (RFC 9457).
       properties:
         type:
+          x-order: 1
           type: string
           format: uri
           description: |
@@ -100,25 +347,81 @@ components:
             part of the URL is the error type's name, for example `not-found`.
           examples: [https://docs.stavewell.io/errors/not-found]
         title:
+          x-order: 2
           type: string
           description: |
             A short name for the error type. It's the same for every error of
             that type.
           examples: [Not found]
         status:
+          x-order: 3
           type: integer
           description: The HTTP status code of the response.
           examples: [404]
         detail:
+          x-order: 4
           type: string
           description: A sentence that explains this occurrence of the error.
           examples: [No endpoint matches this path.]
         request_id:
+          x-order: 5
           type: string
           description: |
             An identifier for this request. The same identifier appears in the
             server log.
           examples: [req_k4vz2qn7hxwm3pt6rdyc5jbe2a]
+    LedgerName:
+      type: string
+      description: |
+        1 to 64 characters: lowercase letters, digits and hyphens, starting
+        with a letter. Unique within your organization.
+      pattern: "^[a-z][a-z0-9-]{0,63}$"
+      examples: [orders]
+    CreateLedgerRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: "#/components/schemas/LedgerName"
+    Ledger:
+      type: object
+      additionalProperties: false
+      required: [name, created_at]
+      properties:
+        name:
+          x-order: 1
+          $ref: "#/components/schemas/LedgerName"
+        created_at:
+          x-order: 2
+          type: string
+          format: date-time
+          x-go-type: string
+          description: |
+            When the ledger was created, in UTC with three fractional digits.
+          examples: ["2026-11-06T19:22:31.123Z"]
+    LedgerList:
+      type: object
+      additionalProperties: false
+      required: [ledgers, next_cursor, has_more]
+      properties:
+        ledgers:
+          x-order: 1
+          type: array
+          description: A page of ledgers, oldest first.
+          items:
+            $ref: "#/components/schemas/Ledger"
+        next_cursor:
+          x-order: 2
+          type: string
+          description: |
+            Pass this as `cursor` to get the next page. It's present even on
+            the last page.
+        has_more:
+          x-order: 3
+          type: boolean
+          description: |
+            Whether more ledgers existed after this page when the request ran.
     Health:
       type: object
       additionalProperties: false

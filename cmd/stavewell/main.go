@@ -107,7 +107,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config) (err error) {
 	}
 
 	srv := &http.Server{
-		Handler: server.Handler(logger),
+		Handler: server.Handler(logger, db),
 		// Route net/http's own messages through the structured logger.
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
