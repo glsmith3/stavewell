@@ -341,6 +341,7 @@ func TestProtectedRowsCannotChange(t *testing.T) {
 
 		{"API key scope: change", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, `UPDATE api_key_scopes SET scope = 'ledger:write' WHERE api_key_id = 1`, "scopes never change"},
 		{"API key scope: delete", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, `DELETE FROM api_key_scopes WHERE api_key_id = 1`, "scopes never change"},
+		{"API key scope: replace", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, `REPLACE INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:read')`, "scopes never change"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -420,6 +421,10 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{"API key scope: unknown scope", `INSERT INTO api_key_scopes (api_key_id, scope) VALUES (1, 'ledger:admin')`},
 		{"daily usage: malformed day", `INSERT INTO daily_usage (organization_id, day) VALUES (1, '2026-11-6')`},
 		{"daily usage: impossible day", `INSERT INTO daily_usage (organization_id, day) VALUES (1, '2026-13-01')`},
+		{"organization: row number 0", `INSERT INTO organizations (id, public_id, name, created_at) VALUES (0, 'org_cccccccccccccccccccccccccc', 'x', '` + testTime + `')`},
+		{"organization: row number -1", `INSERT INTO organizations (id, public_id, name, created_at) VALUES (-1, 'org_cccccccccccccccccccccccccc', 'x', '` + testTime + `')`},
+		{"API key: row number -1", `INSERT INTO api_keys (id, public_id, organization_id, name, key_hash, created_at, expires_at) VALUES (-1, 'key_bbbbbbbbbbbbbbbbbbbbbbbbbb', 1, 'k', '` + strings.Repeat("1", 64) + `', '` + testTime + `', '` + testTime + `')`},
+		{"ledger: row number -1", `INSERT INTO ledgers (id, organization_id, name, created_at) VALUES (-1, 1, 'other', '` + testTime + `')`},
 		{"daily usage: negative count", `INSERT INTO daily_usage (organization_id, day, records_appended) VALUES (1, '2026-11-06', -1)`},
 	}
 	for _, tt := range tests {

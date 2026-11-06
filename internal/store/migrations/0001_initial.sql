@@ -2,8 +2,12 @@
 --
 -- Conventions:
 --   - Every table is STRICT, so a column only accepts values of its type.
---   - Internal row numbers (id columns) never leave the server. Public IDs
---     (org_..., key_...) are separate columns.
+--   - Internal row numbers (id columns) start at 1 and never leave the
+--     server. Public IDs (org_..., key_...) are separate columns. The
+--     replace triggers below rely on row numbers being 1 or more: in a
+--     BEFORE INSERT trigger, an insert without an id has no usable NEW.id
+--     (SQLite gives -1, and documents the value as undefined), so it must
+--     never match a stored row.
 --   - Times are text in the format the API returns: UTC, three fractional
 --     digits, for example 2026-11-06T19:22:31.123Z. Each time column checks
 --     that its value is a real date and time in exactly that format.
@@ -25,7 +29,7 @@
 --   - A revoked API key stays revoked.
 
 CREATE TABLE organizations (
-    id                INTEGER PRIMARY KEY,
+    id                INTEGER PRIMARY KEY CHECK (id >= 1),
     public_id         TEXT    NOT NULL UNIQUE
                               CHECK (length(public_id) = 30 AND public_id GLOB 'org_*' AND substr(public_id, 5) NOT GLOB '*[^a-z2-7]*'),
     name              TEXT    NOT NULL
@@ -56,7 +60,7 @@ BEGIN
 END;
 
 CREATE TABLE api_keys (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY CHECK (id >= 1),
     public_id       TEXT    NOT NULL UNIQUE
                             CHECK (length(public_id) = 30 AND public_id GLOB 'key_*' AND substr(public_id, 5) NOT GLOB '*[^a-z2-7]*'),
     organization_id INTEGER NOT NULL REFERENCES organizations (id),
@@ -121,11 +125,18 @@ BEGIN
     SELECT RAISE(ABORT, 'an API key''s scopes never change');
 END;
 
+CREATE TRIGGER api_key_scopes_no_replace BEFORE INSERT ON api_key_scopes
+WHEN EXISTS (SELECT 1 FROM api_key_scopes WHERE api_key_id = NEW.api_key_id AND scope = NEW.scope)
+BEGIN
+    SELECT RAISE(ABORT, 'an API key''s scopes never change');
+END;
+
 CREATE TABLE ledgers (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY CHECK (id >= 1),
     organization_id INTEGER NOT NULL REFERENCES organizations (id),
     -- 1 to 64 lowercase letters, digits and hyphens, starting with a letter.
-    -- Part of every record hash in the ledger, so it never changes.
+    -- Like the rest of a ledger, it never changes after the ledger is
+    -- created.
     name            TEXT    NOT NULL
                             CHECK (length(name) BETWEEN 1 AND 64 AND name GLOB '[a-z]*' AND name NOT GLOB '*[^a-z0-9-]*'),
     created_at      TEXT    NOT NULL
