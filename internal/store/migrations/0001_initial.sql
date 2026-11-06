@@ -11,7 +11,7 @@
 CREATE TABLE organizations (
     id                INTEGER PRIMARY KEY,
     public_id         TEXT    NOT NULL UNIQUE
-                              CHECK (length(public_id) = 30 AND public_id GLOB 'org_*'),
+                              CHECK (length(public_id) = 30 AND public_id GLOB 'org_*' AND substr(public_id, 5) NOT GLOB '*[^a-z2-7]*'),
     name              TEXT    NOT NULL
                               CHECK (length(name) BETWEEN 1 AND 64),
     created_at        TEXT    NOT NULL
@@ -25,7 +25,7 @@ CREATE TABLE organizations (
 CREATE TABLE api_keys (
     id              INTEGER PRIMARY KEY,
     public_id       TEXT    NOT NULL UNIQUE
-                            CHECK (length(public_id) = 30 AND public_id GLOB 'key_*'),
+                            CHECK (length(public_id) = 30 AND public_id GLOB 'key_*' AND substr(public_id, 5) NOT GLOB '*[^a-z2-7]*'),
     organization_id INTEGER NOT NULL REFERENCES organizations (id),
     name            TEXT    NOT NULL
                             CHECK (length(name) BETWEEN 1 AND 64),
@@ -88,6 +88,19 @@ CREATE TABLE records (
 -- Records are append-only. These triggers reject any change or removal, as
 -- protection against a bug in Stavewell's code. They don't stop someone who
 -- can edit the database file directly; chain verification detects that.
+
+-- REPLACE (INSERT OR REPLACE, or REPLACE INTO) resolves a conflict by
+-- deleting the existing row, and SQLite doesn't fire DELETE triggers for
+-- that unless the connection turns on recursive_triggers. So this trigger
+-- rejects any insert that conflicts with an existing record, whatever the
+-- connection's settings.
+CREATE TRIGGER records_no_replace BEFORE INSERT ON records
+WHEN EXISTS (SELECT 1 FROM records WHERE ledger_id = NEW.ledger_id AND sequence = NEW.sequence)
+  OR EXISTS (SELECT 1 FROM records WHERE ledger_id = NEW.ledger_id AND idempotency_key = NEW.idempotency_key)
+BEGIN
+    SELECT RAISE(ABORT, 'records are append-only');
+END;
+
 CREATE TRIGGER records_no_update BEFORE UPDATE ON records
 BEGIN
     SELECT RAISE(ABORT, 'records are append-only');

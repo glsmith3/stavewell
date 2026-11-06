@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/glsmith3/stavewell/internal/ids"
 )
 
 // openTestStore opens a new database in a temporary directory.
@@ -244,19 +246,66 @@ func seed(t *testing.T, s *Store) {
 	}
 }
 
+// recordsSnapshot returns every record's ledger, sequence, data and
+// idempotency key, in order, as one string.
+func recordsSnapshot(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var snap string
+	err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(group_concat(ledger_id || ':' || sequence || ':' || data || ':' || COALESCE(idempotency_key, ''), ' '), '')
+		 FROM (SELECT * FROM records ORDER BY ledger_id, sequence)`).Scan(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
 func TestRecordsAreAppendOnly(t *testing.T) {
 	ctx := context.Background()
-	s, _ := openTestStore(t)
-	seed(t, s)
-	for _, stmt := range []string{
-		`UPDATE records SET data = '{"changed":1}' WHERE ledger_id = 1 AND sequence = 1`,
-		`UPDATE records SET idempotency_key = 'k' WHERE ledger_id = 1 AND sequence = 1`,
-		`DELETE FROM records WHERE ledger_id = 1 AND sequence = 1`,
-	} {
-		_, err := s.write.ExecContext(ctx, stmt)
-		if err == nil || !strings.Contains(err.Error(), "append-only") {
-			t.Errorf("%s: err = %v, want an append-only error", stmt, err)
-		}
+	insert := func(verb, seq, data, key string) string {
+		return verb + ` INTO records (ledger_id, sequence, created_at, data, data_hash, previous_hash, hash, idempotency_key)
+			VALUES (1, ` + seq + `, '` + testTime + `', '` + data + `', '` + zeroHash + `', '` + zeroHash + `', '` + zeroHash + `', ` + key + `)`
+	}
+	tests := []struct {
+		name string
+		stmt string
+	}{
+		{"update data", `UPDATE records SET data = '{"changed":1}' WHERE ledger_id = 1 AND sequence = 1`},
+		{"update idempotency key", `UPDATE records SET idempotency_key = 'k' WHERE ledger_id = 1 AND sequence = 1`},
+		{"update or replace", `UPDATE OR REPLACE records SET sequence = 1 WHERE ledger_id = 1 AND sequence = 2`},
+		{"delete", `DELETE FROM records WHERE ledger_id = 1 AND sequence = 1`},
+		{"insert or replace, same sequence", insert("INSERT OR REPLACE", "1", `{"forged":true}`, "NULL")},
+		{"replace, same sequence", insert("REPLACE", "1", `{"forged":true}`, "NULL")},
+		{"insert or replace, same idempotency key", insert("INSERT OR REPLACE", "3", `{"forged":true}`, "'k2'")},
+		{"upsert", insert("INSERT", "1", `{"forged":true}`, "NULL") + ` ON CONFLICT DO UPDATE SET data = excluded.data`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, path := openTestStore(t)
+			seed(t, s)
+			if _, err := s.write.ExecContext(ctx, insert("INSERT", "2", "{}", "'k2'")); err != nil {
+				t.Fatal(err)
+			}
+			before := recordsSnapshot(t, s.read)
+
+			// Run the statement on Stavewell's own connection, and on a plain
+			// connection with SQLite's default settings, as a tool such as
+			// the sqlite3 shell would open.
+			plain, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plain.Close()
+			for name, db := range map[string]*sql.DB{"store": s.write, "plain": plain} {
+				_, err := db.ExecContext(ctx, tt.stmt)
+				if err == nil || !strings.Contains(err.Error(), "append-only") {
+					t.Errorf("%s connection: err = %v, want an append-only error", name, err)
+				}
+			}
+			if after := recordsSnapshot(t, s.read); after != before {
+				t.Errorf("records changed:\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
 	}
 }
 
@@ -287,6 +336,10 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{"ledger: name with an underscore", `INSERT INTO ledgers (organization_id, name, created_at) VALUES (1, 'my_orders', '` + testTime + `')`},
 		{"ledger: name too long", `INSERT INTO ledgers (organization_id, name, created_at) VALUES (1, 'a` + strings.Repeat("b", 64) + `', '` + testTime + `')`},
 		{"organization: malformed public ID", `INSERT INTO organizations (public_id, name, created_at) VALUES ('org_short', 'x', '` + testTime + `')`},
+		{"organization: public ID with other characters", `INSERT INTO organizations (public_id, name, created_at) VALUES ('org_ !!!!!!!!!!!!!!!!!!!!!!!!!', 'x', '` + testTime + `')`},
+		{"organization: public ID with uppercase letters", `INSERT INTO organizations (public_id, name, created_at) VALUES ('org_CCCCCCCCCCCCCCCCCCCCCCCCCC', 'x', '` + testTime + `')`},
+		{"organization: public ID with digits outside base32", `INSERT INTO organizations (public_id, name, created_at) VALUES ('org_cccccccccccccccccccccccc18', 'x', '` + testTime + `')`},
+		{"API key: public ID with other characters", `INSERT INTO api_keys (public_id, organization_id, name, key_hash, created_at, expires_at) VALUES ('key_ !!!!!!!!!!!!!!!!!!!!!!!!!', 1, 'k', '` + strings.Repeat("1", 64) + `', '` + testTime + `', '` + testTime + `')`},
 		{"organization: empty name", `INSERT INTO organizations (public_id, name, created_at) VALUES ('org_cccccccccccccccccccccccccc', '', '` + testTime + `')`},
 		{"organization: negative stored data", `UPDATE organizations SET stored_data_bytes = -1 WHERE id = 1`},
 		{"API key: duplicate key hash", `INSERT INTO api_keys (public_id, organization_id, name, key_hash, created_at, expires_at) VALUES ('key_bbbbbbbbbbbbbbbbbbbbbbbbbb', 1, 'k', '` + zeroHash + `', '` + testTime + `', '` + testTime + `')`},
@@ -324,6 +377,9 @@ func TestSchemaAcceptsValidRows(t *testing.T) {
 		// Revoking a key.
 		`UPDATE api_keys SET revoked_at = '` + testTime + `' WHERE id = 1`,
 		`INSERT INTO daily_usage (organization_id, day, records_appended) VALUES (1, '2026-11-06', 1)`,
+		// Public IDs exactly as the ID generator makes them.
+		`INSERT INTO organizations (id, public_id, name, created_at) VALUES (3, '` + ids.New("org") + `', 'Generated', '` + testTime + `')`,
+		`INSERT INTO api_keys (public_id, organization_id, name, key_hash, created_at, expires_at) VALUES ('` + ids.New("key") + `', 3, 'k', '` + strings.Repeat("2", 64) + `', '` + testTime + `', '` + testTime + `')`,
 	} {
 		if _, err := s.write.ExecContext(ctx, stmt); err != nil {
 			t.Errorf("statement failed: %v\n%s", err, stmt)
