@@ -1,4 +1,6 @@
-// Command stavewell runs the Stavewell API server.
+// Command stavewell runs the Stavewell API server, or, with "admin"
+// arguments, an admin command that manages organizations and API keys. Run
+// "stavewell help" for the list of commands.
 //
 // Configuration comes from environment variables:
 //
@@ -8,6 +10,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,6 +57,23 @@ func main() {
 	}
 	if cfg.dbPath == "" {
 		cfg.dbPath = defaultDBPath
+	}
+
+	// With arguments, run an admin command instead of the server.
+	if args := os.Args[1:]; len(args) > 0 {
+		c := command{ctx: ctx, stdout: os.Stdout, stderr: os.Stderr, dbPath: cfg.dbPath, now: time.Now}
+		code := exitUsage
+		switch args[0] {
+		case "admin":
+			code = runAdmin(c, args[1:])
+		case "help", "-h", "-help", "--help":
+			fmt.Fprint(os.Stdout, usage)
+			code = exitOK
+		default:
+			_ = c.usageError(fmt.Sprintf("unknown command %q", args[0]))
+		}
+		stop()
+		os.Exit(code)
 	}
 
 	if err := run(ctx, logger, cfg); err != nil {
