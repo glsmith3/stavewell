@@ -60,6 +60,55 @@ The API is defined in [`api/openapi.yaml`](api/openapi.yaml). After you change i
 go generate ./...
 ```
 
+## Organizations and API keys
+
+Stavewell has no sign-up. You create organizations and API keys with admin commands, run where the server's database is. They use the same `STAVEWELL_DB` setting as the server, and they work while the server is running. They don't create a database, so start the server once first. In this version, no API endpoint uses API keys.
+
+Create an organization:
+
+```bash
+go run ./cmd/stavewell admin org create --name "Test organization"
+```
+
+```
+Organization created.
+
+ID:       org_ngztvgyskawogjffukqizkghrh
+Name:     Test organization
+Created:  2026-11-06T20:42:24.040Z
+```
+
+Create an API key for the organization, with one or both of the scopes `ledger:read` and `ledger:write`:
+
+```bash
+go run ./cmd/stavewell admin key create --org org_ngztvgyskawogjffukqizkghrh --name "Local testing" --scopes ledger:read,ledger:write
+```
+
+```
+API key created. This is the only time the key is shown, so copy it now.
+
+Key:           sw_exampleexampleexampleexampleexampleexampleexamplekey
+Key ID:        key_abprqbbshjploerfcxoy6stzbw
+Organization:  org_ngztvgyskawogjffukqizkghrh
+Name:          Local testing
+Scopes:        ledger:read, ledger:write
+Expires:       2027-02-04T20:42:24.052Z
+```
+
+Your IDs, times and key will differ. The key shown here is a placeholder: a real key is random. Stavewell stores only a hash of the key, so it can't show you the key again. A key expires after 90 days, or after the number of days you set with `--expires-in-days` (1 to 365).
+
+Other admin commands:
+
+- `admin org list` lists organizations.
+- `admin key list --org ORG_ID` lists an organization's API keys, with their scopes, expiry and status. It never shows the keys themselves.
+- `admin key revoke --key KEY_ID` revokes an API key. A revoked key can't be used again.
+
+To see every command, run:
+
+```bash
+go run ./cmd/stavewell help
+```
+
 ## Maintainer
 
 [@glsmith3](https://github.com/glsmith3)
