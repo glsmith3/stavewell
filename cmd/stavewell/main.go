@@ -3,6 +3,7 @@
 // Configuration comes from environment variables:
 //
 //	STAVEWELL_ADDR  Address to listen on. Default: 127.0.0.1:8080
+//	STAVEWELL_DB    Path of the SQLite database file. Default: stavewell.db
 package main
 
 import (
@@ -17,15 +18,23 @@ import (
 
 	"github.com/glsmith3/stavewell/internal/buildinfo"
 	"github.com/glsmith3/stavewell/internal/server"
+	"github.com/glsmith3/stavewell/internal/store"
 )
 
 // defaultAddr listens on the local machine only. Public traffic reaches the
 // server through a tunnel, never through an open port.
 const defaultAddr = "127.0.0.1:8080"
 
+// defaultDBPath is the database file, in the current directory.
+const defaultDBPath = "stavewell.db"
+
 // shutdownTimeout is how long in-flight requests get to finish after a
 // shutdown signal.
 const shutdownTimeout = 10 * time.Second
+
+// startupTimeout is how long opening the database may take, including
+// waiting for another process that holds its write lock.
+const startupTimeout = 30 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -39,22 +48,50 @@ func main() {
 		stop()
 	}()
 
-	addr := os.Getenv("STAVEWELL_ADDR")
-	if addr == "" {
-		addr = defaultAddr
+	cfg := config{addr: os.Getenv("STAVEWELL_ADDR"), dbPath: os.Getenv("STAVEWELL_DB")}
+	if cfg.addr == "" {
+		cfg.addr = defaultAddr
+	}
+	if cfg.dbPath == "" {
+		cfg.dbPath = defaultDBPath
 	}
 
-	if err := run(ctx, logger, addr); err != nil {
+	if err := run(ctx, logger, cfg); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-// run serves the API on addr until ctx is canceled, then shuts down
-// gracefully. It returns an error if the address can't be bound or the
-// server fails.
-func run(ctx context.Context, logger *slog.Logger, addr string) error {
-	ln, err := net.Listen("tcp", addr)
+// config is the server's configuration.
+type config struct {
+	addr   string // address to listen on
+	dbPath string // path of the database file
+}
+
+// run opens the database, then serves the API until ctx is canceled, then
+// shuts down gracefully. It returns an error if the database can't be
+// opened, the address can't be bound or the server fails.
+func run(ctx context.Context, logger *slog.Logger, cfg config) (err error) {
+	// Startup has its own deadline. A shutdown signal that arrives during
+	// startup takes effect once startup finishes.
+	startCtx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+	db, err := store.Open(startCtx, cfg.dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := db.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	version, err := db.SchemaVersion(startCtx)
+	if err != nil {
+		return err
+	}
+	logger.Info("database ready", "schema_version", version)
+
+	ln, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return err
 	}
