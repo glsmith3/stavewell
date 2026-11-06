@@ -238,3 +238,45 @@ func TestHashRejectsSequenceOutOfRange(t *testing.T) {
 		t.Errorf("Hash with sequence %d: %v", int64(MaxNumber), err)
 	}
 }
+
+func TestVerify(t *testing.T) {
+	// Record 1 of the example in api/openapi.yaml.
+	good := Stored{
+		Ledger:       "orders",
+		Sequence:     1,
+		CreatedAt:    "2026-11-06T19:22:31.123Z",
+		Data:         []byte(`{"amount":"12.50","order_id":"A-1001","quantity":2}`),
+		DataHash:     "c8b92db4384c15e38afd338748232773fc295b5192f6736e24896742ba31d01c",
+		PreviousHash: ZeroHash,
+		Hash:         "7f525a4bd1e34abb150d86e9b63ef5c403a239c796f7df6ae188de4ff6262e5a",
+	}
+	if !Verify(good, ZeroHash) {
+		t.Fatal("Verify(the spec's record 1) = false")
+	}
+	// Data in another form with the same canonical JSON still passes.
+	spaced := good
+	spaced.Data = []byte(`{ "quantity": 2, "order_id": "A-1001", "amount": "12.50" }`)
+	if !Verify(spaced, ZeroHash) {
+		t.Error("Verify with non-canonical spacing and order = false")
+	}
+	for name, change := range map[string]func(*Stored){
+		"data":          func(r *Stored) { r.Data = []byte(`{"amount":"12.51","order_id":"A-1001","quantity":2}`) },
+		"data not JSON": func(r *Stored) { r.Data = []byte(`{"amount":`) },
+		"data_hash":     func(r *Stored) { r.DataHash = strings.Repeat("0", 64) },
+		"ledger":        func(r *Stored) { r.Ledger = "refunds" },
+		"sequence":      func(r *Stored) { r.Sequence = 2 },
+		"created_at":    func(r *Stored) { r.CreatedAt = "2026-11-06T19:22:31.124Z" },
+		"previous_hash": func(r *Stored) { r.PreviousHash = strings.Repeat("1", 64) },
+		"hash":          func(r *Stored) { r.Hash = strings.Repeat("2", 64) },
+	} {
+		r := good
+		change(&r)
+		if Verify(r, ZeroHash) {
+			t.Errorf("Verify with a changed %s = true", name)
+		}
+	}
+	// The link to the record before is checked.
+	if Verify(good, strings.Repeat("3", 64)) {
+		t.Error("Verify with the wrong previous record hash = true")
+	}
+}

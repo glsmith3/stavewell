@@ -27,6 +27,7 @@ var requiredScopes = map[string]string{
 	"POST /v1/ledgers/{name}/records":           apikey.ScopeLedgerWrite,
 	"GET /v1/ledgers/{name}/records":            apikey.ScopeLedgerRead,
 	"GET /v1/ledgers/{name}/records/{sequence}": apikey.ScopeLedgerRead,
+	"GET /v1/ledgers/{name}/chain-verification": apikey.ScopeLedgerRead,
 }
 
 // principalKey is the context key for the authenticated caller.

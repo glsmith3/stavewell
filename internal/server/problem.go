@@ -53,6 +53,7 @@ const (
 	detailInvalidLedgerName = "The ledger name must be 1 to 64 lowercase letters, digits and hyphens, starting with a letter."
 	detailInvalidSequence   = "The sequence number must be a whole number from 1 up."
 	detailMissingData       = "The request body must be a JSON object with a data field."
+	detailInvalidFrom       = "The from parameter must be a whole number from 1 up, and at most one more than the ledger's latest sequence number."
 	detailInvalidKey        = "The Idempotency-Key header must be 1 to 128 letters, digits, hyphens and underscores."
 	detailKeyReused         = "This idempotency key was already used in this ledger with different data, so nothing was appended."
 	detailUnauthorized      = "This request needs a valid API key in the Authorization header."

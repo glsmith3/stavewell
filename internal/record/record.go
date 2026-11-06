@@ -216,3 +216,60 @@ func Hash(f Fields) (string, error) {
 	}
 	return hashHex(v), nil
 }
+
+// Stored is a record as stored, with the hashes it claims.
+type Stored struct {
+	Ledger       string
+	Sequence     int64
+	CreatedAt    string // as stored, in the API's time format
+	Data         []byte // as stored
+	DataHash     string
+	PreviousHash string
+	Hash         string
+}
+
+// Verify reports whether r passes the three checks of chain verification:
+// its data_hash is the hash of the canonical JSON of its data, its
+// previous_hash is previous (the record hash of the record before it, or
+// ZeroHash for record 1), and its hash is the record hash of its other
+// fields.
+func Verify(r Stored, previous string) bool {
+	var v Verifier
+	return v.Verify(r, previous)
+}
+
+// A Verifier runs Verify on one record after another, reusing its memory
+// for the canonical form of each record's data. The zero Verifier is ready
+// to use.
+type Verifier struct {
+	buf []byte
+}
+
+// canonicalOptions make jsontext.AppendFormat produce canonical JSON, as
+// Value.Canonicalize does.
+var canonicalOptions = []jsontext.Options{
+	jsontext.CanonicalizeRawInts(true),
+	jsontext.CanonicalizeRawFloats(true),
+	jsontext.ReorderRawObjects(true),
+}
+
+// Verify is the same as the Verify function. r.Data is only read, and
+// needn't stay valid after it returns.
+func (v *Verifier) Verify(r Stored, previous string) bool {
+	var err error
+	v.buf, err = jsontext.AppendFormat(v.buf[:0], r.Data, canonicalOptions...)
+	if err != nil || hashHex(v.buf) != r.DataHash {
+		return false
+	}
+	if r.PreviousHash != previous {
+		return false
+	}
+	h, err := Hash(Fields{
+		Ledger:       r.Ledger,
+		Sequence:     r.Sequence,
+		CreatedAt:    r.CreatedAt,
+		DataHash:     r.DataHash,
+		PreviousHash: r.PreviousHash,
+	})
+	return err == nil && h == r.Hash
+}
