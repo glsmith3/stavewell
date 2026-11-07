@@ -278,19 +278,21 @@ curl http://127.0.0.1:8080/v1/ledgers/orders/chain-verification \
 {"ledger":"orders","intact":true,"first_sequence":1,"last_sequence":3,"last_hash":"bcbec99a6a37315e1d89217ceaf1809c12c514066ed0c750e47d32d84e00d053","reached_latest":true,"broken_sequence":null}
 ```
 
-For each record, it checks that `data_hash` matches `data`, that `hash` matches the record's other fields, and that `previous_hash` matches the record before it. A request checks up to 10,000 records. If `reached_latest` is `false`, check the rest with `?from=` set to `last_sequence` plus 1.
+For each record, it checks that `data` is stored exactly as canonical JSON that follows the data rules and that `data_hash` is its hash, that `hash` matches the record's other fields, and that `previous_hash` matches the record numbered one less. A request checks up to 10,000 records. If `reached_latest` is `false`, check the rest with `?from=` set to `last_sequence` plus 1.
 
 A broken chain isn't an error. The response is still `200`, with `intact` set to `false`, `broken_sequence` set to the first record that failed, and `last_hash` set to `null`. Checking stops at that record.
 
 What chain verification proves:
 
 - **It catches** a record changed in the database without every later record hash being recomputed: for example, by disk corruption, a faulty migration or someone editing the database file.
-- **It can't catch** someone with full control of the server who changes a record and then recomputes every record hash after it.
-- **To protect against that,** save `last_sequence` and `last_hash` somewhere outside Stavewell. Later, confirm that the record with that sequence number still has that record hash, and that chain verification still reports the chain as intact.
+- **It can't catch** someone with full control of the server who changes a record and then recomputes every record hash after it. It also can't catch records removed from the end of a ledger, or records moved to a ledger with the same name in another organization.
+- **To protect against these,** save `last_sequence` and `last_hash` somewhere outside Stavewell. Later, confirm that the record with that sequence number still has that record hash, and that chain verification still reports the chain as intact.
 
 ### Running chain verification yourself
 
-To check a chain without trusting the server's answer, run one of the scripts in [`examples/chain-verification/`](examples/chain-verification/). They read the records through the API and run the same three checks themselves. Each uses only its language's standard library. They're tested with Python 3.13 and Node.js 22.
+To check a chain without trusting the server's answer, run one of the scripts in [`examples/chain-verification/`](examples/chain-verification/). They read the records through the API and run the same checks themselves. Each uses only its language's standard library. The JavaScript script needs Node.js 22 or later. They're tested with Python 3.13 and Node.js 22.
+
+The scripts see records only as the API returns them, not as the server stores them. So a change that alters how a record's data is stored without changing its value, such as added spaces, is reported by the server's chain verification but not by the scripts.
 
 ```bash
 STAVEWELL_API_KEY=sw_exampleexampleexampleexampleexampleexampleexamplekey python3 examples/chain-verification/verify_chain.py orders
@@ -308,7 +310,7 @@ STAVEWELL_API_KEY=sw_exampleexampleexampleexampleexampleexampleexamplekey node e
 {"ledger":"orders","intact":true,"first_sequence":1,"last_sequence":3,"last_hash":"bcbec99a6a37315e1d89217ceaf1809c12c514066ed0c750e47d32d84e00d053","reached_latest":true,"broken_sequence":null}
 ```
 
-Both print the same fields as the server's response. They exit with status `0` if the chain is intact, or `1` if it's broken. To use a server at another address, add `--url`, for example `--url http://127.0.0.1:9090`.
+Both print the same fields as the server's response. They exit with status `0` if they checked the whole ledger and the chain is intact, `1` if the chain is broken, or `2` if they couldn't check the whole ledger: after an error, or if the API returned fewer records than the ledger's latest sequence number. To use a server at another address, add `--url`, for example `--url http://127.0.0.1:9090`.
 
 `api/openapi.yaml` describes every endpoint, parameter and error.
 

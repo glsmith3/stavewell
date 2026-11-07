@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run chain verification on a Stavewell ledger, independently of the server.
 //
-// Targets Stavewell v0.1.0-dev. Needs Node.js 18 or later, and nothing else.
+// Targets Stavewell v0.1.0-dev. Needs Node.js 22 or later, and nothing else.
 //
 // Usage:
 //
@@ -13,16 +13,21 @@
 // The script reads every record in the ledger through the API, a page at a
 // time, and checks each one as the server's chain verification does:
 //
-// - data_hash is the SHA-256 hash of the canonical JSON of data.
-// - hash is the SHA-256 hash of the canonical JSON of an object with the
+// - Its data follows Stavewell's rules for numbers, and data_hash is the
+//   SHA-256 hash of the canonical JSON of data.
+// - Its previous_hash is the hash of the record numbered one less, or 64
+//   zeros for record 1.
+// - Its hash is the SHA-256 hash of the canonical JSON of an object with the
 //   record's created_at, data_hash, ledger, previous_hash and sequence.
-// - previous_hash is the hash of the record before it, or 64 zeros for
-//   record 1.
 //
 // It stops at the first record that fails, and prints the result as JSON
-// with the same fields as the server's chain verification response. It
-// exits with status 0 if the chain is intact, 1 if it's broken, and 2 if it
-// couldn't run.
+// with the same fields as the server's chain verification response.
+//
+// Exit status:
+//   0  the whole ledger was checked, and the chain is intact
+//   1  the chain is broken
+//   2  the script couldn't check the whole ledger: an error, or the API
+//      returned fewer records than the ledger's latest sequence number
 
 'use strict';
 
@@ -30,10 +35,41 @@ const crypto = require('node:crypto');
 
 const ZERO_HASH = '0'.repeat(64);
 
+// A number that Stavewell never writes: one with a decimal point or an
+// exponent, or outside the safe integers. A record whose data has one
+// fails. JSON.parse would read 2.0 as 2, so the parser checks each number's
+// source text, which Node.js 22 provides.
+class NotWholeNumber {
+  constructor(text) {
+    this.text = text;
+  }
+}
+
+// The API returned something that isn't a valid Stavewell response.
+class MalformedResponse extends Error {}
+
+class APIError extends Error {}
+
+function parse(text) {
+  try {
+    return JSON.parse(text, function (key, value, context) {
+      if (typeof value === 'number' && !(/^-?(0|[1-9][0-9]*)$/.test(context.source) && Number.isSafeInteger(value))) {
+        return new NotWholeNumber(context.source);
+      }
+      return value;
+    });
+  } catch (e) {
+    throw new MalformedResponse(`the response isn't JSON: ${e.message}`);
+  }
+}
+
 // canonical returns value as canonical JSON (RFC 8785). RFC 8785 is defined
 // in terms of JavaScript's own JSON.stringify for numbers and strings, so
 // only objects need special handling.
 function canonical(value) {
+  if (value instanceof NotWholeNumber) {
+    throw new Error('not a value Stavewell data can hold');
+  }
   if (Array.isArray(value)) {
     return '[' + value.map(canonical).join(',') + ']';
   }
@@ -50,9 +86,32 @@ function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-// passes reports whether a record passes the three checks.
-function passes(record, ledger, previous) {
-  if (sha256(canonical(record.data)) !== record.data_hash) {
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof NotWholeNumber);
+}
+
+// field returns obj[name], which must be of the type check accepts.
+function field(obj, name, check) {
+  const value = isPlainObject(obj) ? obj[name] : undefined;
+  if (!check(value)) {
+    throw new MalformedResponse(`${name} is missing or has the wrong type`);
+  }
+  return value;
+}
+
+const isString = (v) => typeof v === 'string';
+const isInteger = (v) => Number.isSafeInteger(v);
+
+// passes reports whether a record passes the checks.
+function passes(record, ledger, sequence, previous) {
+  if (record.sequence !== sequence) {
+    return false;
+  }
+  try {
+    if (!isPlainObject(record.data) || sha256(canonical(record.data)) !== record.data_hash) {
+      return false;
+    }
+  } catch {
     return false;
   }
   if (record.previous_hash !== previous) {
@@ -68,61 +127,90 @@ function passes(record, ledger, previous) {
   return sha256(canonical(fields)) === record.hash;
 }
 
-class APIError extends Error {}
-
 async function get(url, key) {
   const response = await fetch(url, { headers: { Authorization: 'Bearer ' + key } });
-  const body = await response.json().catch(() => ({}));
+  const text = await response.text();
   if (!response.ok) {
-    throw new APIError(`The API returned ${response.status}. ${body.detail || ''}`);
+    let detail = '';
+    try {
+      detail = JSON.parse(text).detail || '';
+    } catch {}
+    throw new APIError(`The API returned ${response.status}. ${detail}`);
   }
-  return body;
+  return parse(text);
 }
 
-// records yields every record in the ledger, in sequence order.
+// records yields every record in the ledger, in the order the API returns
+// them.
 async function* records(base, ledger, key) {
   const path = `${base}/v1/ledgers/${encodeURIComponent(ledger)}/records?limit=100`;
   let page = await get(path, key);
   for (;;) {
-    yield* page.records;
-    if (!page.has_more) {
+    for (const record of field(page, 'records', Array.isArray)) {
+      field(record, 'sequence', isInteger);
+      for (const name of ['created_at', 'data_hash', 'previous_hash', 'hash']) {
+        field(record, name, isString);
+      }
+      if (!('data' in record)) {
+        throw new MalformedResponse('data is missing');
+      }
+      yield record;
+    }
+    if (!field(page, 'has_more', (v) => typeof v === 'boolean')) {
       return;
     }
-    page = await get(`${path}&cursor=${encodeURIComponent(page.next_cursor)}`, key);
+    page = await get(`${path}&cursor=${encodeURIComponent(field(page, 'next_cursor', isString))}`, key);
   }
 }
 
 async function verify(base, ledger, key) {
-  const latest = (await get(`${base}/v1/ledgers/${encodeURIComponent(ledger)}`, key)).latest_sequence;
+  const latest = field(await get(`${base}/v1/ledgers/${encodeURIComponent(ledger)}`, key), 'latest_sequence', (v) => v === null || isInteger(v));
   const result = {
     ledger: ledger,
     intact: true,
     first_sequence: null,
     last_sequence: null,
     last_hash: null,
-    reached_latest: true,
+    reached_latest: false,
     broken_sequence: null,
   };
   let previous = ZERO_HASH;
+  let sequence = 1;
   for await (const record of records(base, ledger, key)) {
     if (result.first_sequence === null) {
       result.first_sequence = record.sequence;
     }
     result.last_sequence = record.sequence;
-    if (!passes(record, ledger, previous)) {
+    if (!passes(record, ledger, sequence, previous)) {
       result.intact = false;
       result.broken_sequence = record.sequence;
       result.last_hash = null;
-      result.reached_latest = record.sequence === latest;
-      return result;
+      break;
     }
     previous = record.hash;
     result.last_hash = previous;
+    sequence++;
   }
-  return result;
+  result.reached_latest = result.last_sequence === latest;
+  return { result, latest };
+}
+
+// sourceTextAvailable reports whether JSON.parse gives revivers each value's
+// source text, which Node.js 22 and later do.
+function sourceTextAvailable() {
+  let available = false;
+  JSON.parse('1', (key, value, context) => {
+    available = context !== undefined && typeof context.source === 'string';
+    return value;
+  });
+  return available;
 }
 
 async function main() {
+  if (!sourceTextAvailable()) {
+    console.error(`This script needs Node.js 22 or later. This is Node.js ${process.versions.node}.`);
+    return 2;
+  }
   const args = process.argv.slice(2);
   let url = 'http://127.0.0.1:8080';
   const urlFlag = args.indexOf('--url');
@@ -139,14 +227,28 @@ async function main() {
     console.error('Set STAVEWELL_API_KEY to an API key with the ledger:read scope.');
     return 2;
   }
+  let result, latest;
   try {
-    const result = await verify(url.replace(/\/+$/, ''), args[0], key);
-    console.log(JSON.stringify(result));
-    return result.intact ? 0 : 1;
+    ({ result, latest } = await verify(url.replace(/\/+$/, ''), args[0], key));
   } catch (e) {
-    console.error(e instanceof APIError ? e.message : `Couldn't reach the API: ${e.message}`);
+    if (e instanceof APIError) {
+      console.error(e.message);
+    } else if (e instanceof MalformedResponse) {
+      console.error(`The API's response isn't valid: ${e.message}`);
+    } else {
+      console.error(`Couldn't reach the API: ${e.message}`);
+    }
     return 2;
   }
+  console.log(JSON.stringify(result));
+  if (!result.intact) {
+    return 1;
+  }
+  if (!result.reached_latest) {
+    console.error(`The API returned records up to ${result.last_sequence ?? 'none'}, but the ledger's latest record is ${latest}.`);
+    return 2;
+  }
+  return 0;
 }
 
 main().then((code) => {

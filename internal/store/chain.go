@@ -34,8 +34,9 @@ type ChainResult struct {
 
 // VerifyChain runs chain verification on up to limit records of the
 // organization's ledger with the name, starting at sequence number from.
-// When from is more than 1, the check of record from includes its link to
-// record from − 1. Checking stops at the first record that fails.
+// Each record must pass record.Verify, linking to the record numbered one
+// less. When from is more than 1, the check of record from includes its
+// link to record from − 1. Checking stops at the first record that fails.
 //
 // It returns ErrNotFound if the organization has no ledger with the name,
 // and ErrPastEnd if from is more than one past the ledger's latest record.
@@ -67,6 +68,9 @@ func (s *Store) VerifyChain(ctx context.Context, orgRowID int64, ledger string, 
 	if err := tx.QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(sequence), 0) FROM records WHERE ledger_id = ?", lid).Scan(&latest); err != nil {
 		return ChainResult{}, fmt.Errorf("store: verifying chain: %w", err)
+	}
+	if s.afterLatest != nil {
+		s.afterLatest()
 	}
 	switch {
 	case from > latest+1:
@@ -101,6 +105,7 @@ func (s *Store) VerifyChain(ctx context.Context, orgRowID int64, ledger string, 
 	// valid only until the next call to rows.Next, which is long enough.
 	var data sql.RawBytes
 	var v record.Verifier
+	expected := from
 	for rows.Next() {
 		r := record.Stored{Ledger: ledger}
 		if err := rows.Scan(&r.Sequence, &r.CreatedAt, &data, &r.DataHash, &r.PreviousHash, &r.Hash); err != nil {
@@ -111,19 +116,23 @@ func (s *Store) VerifyChain(ctx context.Context, orgRowID int64, ledger string, 
 			res.First = r.Sequence
 		}
 		res.Last = r.Sequence
-		if !v.Verify(r, previous) {
+		// Each record is numbered one more than the record before it, so a
+		// missing record breaks the chain even if the hashes around it were
+		// recomputed.
+		if r.Sequence != expected || !v.Verify(r, previous) {
 			res.Intact, res.Broken = false, r.Sequence
 			break
 		}
 		previous = r.Hash
+		expected++
 	}
 	if err := rows.Err(); err != nil {
 		return ChainResult{}, fmt.Errorf("store: verifying chain: %w", err)
 	}
 	if res.First == 0 {
-		// The ledger's latest record is at or after from, but no record
-		// was found there: the records from there on are missing.
-		return ChainResult{First: from, Last: from, Broken: from}, nil
+		// Can't happen: in this snapshot, the latest record is at or after
+		// from.
+		return ChainResult{}, fmt.Errorf("store: verifying chain: no records from %d, although the latest is %d", from, latest)
 	}
 	if res.Intact {
 		res.LastHash = previous

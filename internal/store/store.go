@@ -24,6 +24,11 @@ import (
 type Store struct {
 	write *sql.DB
 	read  *sql.DB
+
+	// afterLatest, if set, runs inside VerifyChain just after it reads the
+	// ledger's latest sequence number. Tests use it to append a record at
+	// that moment.
+	afterLatest func()
 }
 
 // maxReadConns is the most read connections open at once.

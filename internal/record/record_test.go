@@ -253,11 +253,21 @@ func TestVerify(t *testing.T) {
 	if !Verify(good, ZeroHash) {
 		t.Fatal("Verify(the spec's record 1) = false")
 	}
-	// Data in another form with the same canonical JSON still passes.
-	spaced := good
-	spaced.Data = []byte(`{ "quantity": 2, "order_id": "A-1001", "amount": "12.50" }`)
-	if !Verify(spaced, ZeroHash) {
-		t.Error("Verify with non-canonical spacing and order = false")
+	// Data stored in any other form fails, even with the same value, because
+	// Stavewell stores data only in canonical form.
+	for _, data := range []string{
+		`{ "amount":"12.50","order_id":"A-1001","quantity":2}`,
+		`{"order_id":"A-1001","amount":"12.50","quantity":2}`,
+		`{"amount":"12.50","order_id":"A-1001","quantity":2.0}`,
+		`{"amount":"12.50","order_id":"A-1001","quantity":20e-1}`,
+		`{"amount":"12.50","order_id":"A-1001","quantity":2.0000000000000001}`,
+		`{"amount":"12.50","order_id":"\u0041-1001","quantity":2}`,
+	} {
+		r := good
+		r.Data = []byte(data)
+		if Verify(r, ZeroHash) {
+			t.Errorf("Verify with data stored as %s = true", data)
+		}
 	}
 	for name, change := range map[string]func(*Stored){
 		"data":          func(r *Stored) { r.Data = []byte(`{"amount":"12.51","order_id":"A-1001","quantity":2}`) },
@@ -278,5 +288,28 @@ func TestVerify(t *testing.T) {
 	// The link to the record before is checked.
 	if Verify(good, strings.Repeat("3", 64)) {
 		t.Error("Verify with the wrong previous record hash = true")
+	}
+}
+
+// TestVerifyChecksDataRules checks that data breaking a rule fails, even
+// with hashes that match it, as after someone recomputes every hash.
+func TestVerifyChecksDataRules(t *testing.T) {
+	for _, data := range []string{
+		`{"n":2.5}`,
+		`{"n":9007199254740993}`,
+		`[1,2]`,
+		nested(MaxDepth + 1),
+		`{"p":"` + strings.Repeat("x", MaxDataBytes) + `"}`,
+	} {
+		sum := sha256.Sum256([]byte(data))
+		r := Stored{Ledger: "orders", Sequence: 1, CreatedAt: "2026-11-06T19:22:31.123Z", Data: []byte(data), DataHash: hex.EncodeToString(sum[:]), PreviousHash: ZeroHash}
+		h, err := Hash(Fields{Ledger: r.Ledger, Sequence: 1, CreatedAt: r.CreatedAt, DataHash: r.DataHash, PreviousHash: ZeroHash})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Hash = h
+		if Verify(r, ZeroHash) {
+			t.Errorf("Verify with data %.40s and matching hashes = true", data)
+		}
 	}
 }

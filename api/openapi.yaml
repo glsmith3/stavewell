@@ -141,10 +141,13 @@ info:
     Chain verification recomputes a ledger's chain to confirm that no record
     was altered. For each record, it checks three things:
 
-    - `data_hash` is the hash of `data`.
+    - `data` is stored exactly as canonical JSON that follows the rules in
+      "Record data", and `data_hash` is its hash. So any change to how a
+      record's data is stored is found, even one that keeps its value, such
+      as `2` rewritten as `2.0`.
     - `hash` is the record hash of the record's other fields.
-    - `previous_hash` is the record hash of the record before it, or 64
-      zeros for record 1.
+    - `previous_hash` is the record hash of the record numbered one less,
+      or 64 zeros for record 1.
 
     A request checks up to 10,000 records. If `reached_latest` is `false`,
     check the rest with `from` set to `last_sequence` plus 1. A broken
@@ -158,8 +161,10 @@ info:
       faulty migration or someone editing the database file.
     - **It can't catch** someone with full control of the server who
       changes a record and then recomputes every record hash after it.
-      Chain verification would report that chain as intact.
-    - **To protect against that,** save `last_sequence` and `last_hash`
+      Chain verification would report that chain as intact. It also can't
+      catch records removed from the end of a ledger, or records moved to a
+      ledger with the same name in another organization.
+    - **To protect against these,** save `last_sequence` and `last_hash`
       from a response somewhere outside Stavewell. Later, confirm that the
       record with that sequence number still has that record hash, and
       that chain verification still reports the chain as intact. You can

@@ -2,9 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -104,11 +105,10 @@ func tamper(t *testing.T, s *Store, statements ...string) {
 // database, as someone with full control of the server could.
 func rehash(t *testing.T, s *Store, org int64, from int64) {
 	t.Helper()
+	// Link to the record that's now before from, whatever its number.
 	previous := record.ZeroHash
-	if from > 1 {
-		if err := s.read.QueryRow("SELECT hash FROM records WHERE sequence = ?", from-1).Scan(&previous); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.read.QueryRow("SELECT COALESCE((SELECT hash FROM records WHERE sequence < ? ORDER BY sequence DESC LIMIT 1), ?)", from, record.ZeroHash).Scan(&previous); err != nil {
+		t.Fatal(err)
 	}
 	rows, err := s.read.Query("SELECT sequence, created_at, data FROM records WHERE sequence >= ? ORDER BY sequence", from)
 	if err != nil {
@@ -128,12 +128,15 @@ func rehash(t *testing.T, s *Store, org int64, from int64) {
 	}
 	rows.Close()
 	for _, r := range all {
-		d := mustData(t, r.data)
-		h, err := record.Hash(record.Fields{Ledger: "orders", Sequence: r.seq, CreatedAt: r.created, DataHash: d.Hash(), PreviousHash: previous})
+		// Hash the stored text as it is, whether or not it follows the
+		// rules, as someone recomputing hashes by hand could.
+		sum := sha256.Sum256([]byte(r.data))
+		dataHash := hex.EncodeToString(sum[:])
+		h, err := record.Hash(record.Fields{Ledger: "orders", Sequence: r.seq, CreatedAt: r.created, DataHash: dataHash, PreviousHash: previous})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.write.Exec("UPDATE records SET data_hash = ?, previous_hash = ?, hash = ? WHERE sequence = ?", d.Hash(), previous, h, r.seq); err != nil {
+		if _, err := s.write.Exec("UPDATE records SET data_hash = ?, previous_hash = ?, hash = ? WHERE sequence = ?", dataHash, previous, h, r.seq); err != nil {
 			t.Fatal(err)
 		}
 		previous = h
@@ -172,6 +175,14 @@ func TestVerifyChainFindsTampering(t *testing.T) {
 		{"record deleted", func(t *testing.T, s *Store, org int64) {
 			tamper(t, s, "DELETE FROM records WHERE sequence = 3")
 		}, ChainResult{First: 1, Last: 4, Broken: 4}},
+		{"record deleted and later hashes recomputed", func(t *testing.T, s *Store, org int64) {
+			tamper(t, s, "DELETE FROM records WHERE sequence = 3")
+			rehash(t, s, org, 4)
+		}, ChainResult{First: 1, Last: 4, Broken: 4}},
+		{"data rewritten without the rules, every later hash recomputed", func(t *testing.T, s *Store, org int64) {
+			tamper(t, s, `UPDATE records SET data = '{"i":2.5}' WHERE sequence = 3`)
+			rehash(t, s, org, 3)
+		}, ChainResult{First: 1, Last: 3, Broken: 3}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := openTestStore(t)
@@ -235,30 +246,50 @@ func TestVerifyChainFromChecksTheLink(t *testing.T) {
 	}
 }
 
-// TestVerifyChainWhileAppending checks that chain verification sees a
-// consistent ledger while records are being appended.
+// TestVerifyChainWhileAppending checks that chain verification sees one
+// consistent snapshot of the ledger: a record appended just after it reads
+// the latest sequence number isn't checked, and the result still reaches
+// the latest record it saw.
 func TestVerifyChainWhileAppending(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTestStore(t)
-	org, _ := chainLedger(t, s, 1)
+	org, records := chainLedger(t, s, 3)
 	data := mustData(t, `{"x": 1}`)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		for range 200 {
-			if _, _, err := s.AppendRecord(ctx, org, "orders", data, "", testNow); err != nil {
-				t.Error(err)
-				return
-			}
-		}
-	})
-	for range 50 {
-		res, err := s.VerifyChain(ctx, org, "orders", 1, 10_000)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !res.Intact || !res.ReachedLatest || res.First != 1 {
-			t.Errorf("while appending: %+v, want intact to the latest record", res)
+	s.afterLatest = func() {
+		if _, _, err := s.AppendRecord(ctx, org, "orders", data, "", testNow); err != nil {
+			t.Error(err)
 		}
 	}
-	wg.Wait()
+	got := verify(t, s, org, 1, 100)
+	s.afterLatest = nil
+	if want := (ChainResult{Intact: true, First: 1, Last: 3, LastHash: records[2].Hash, ReachedLatest: true}); got != want {
+		t.Errorf("with a record appended during the check: %+v, want %+v", got, want)
+	}
+	// The next check sees the new record.
+	if got := verify(t, s, org, 1, 100); !got.Intact || got.Last != 4 || !got.ReachedLatest {
+		t.Errorf("afterward: %+v, want intact through record 4", got)
+	}
+}
+
+// TestVerifyChainFindsChangedForm checks that data stored in any form other
+// than the one appended fails, even when its value is the same. Record 3
+// holds {"i":2}.
+func TestVerifyChainFindsChangedForm(t *testing.T) {
+	for _, data := range []string{
+		`{"i":2.0}`,
+		`{"i":20e-1}`,
+		`{"i":2.0000000000000001}`,
+		`{"i":1e-400}`,
+		`{ "i" : 2 }`,
+		`{"\u0069":2}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			s, _ := openTestStore(t)
+			org, _ := chainLedger(t, s, 5)
+			tamper(t, s, "UPDATE records SET data = '"+data+"' WHERE sequence = 3")
+			if got, want := verify(t, s, org, 1, 100), (ChainResult{First: 1, Last: 3, Broken: 3}); got != want {
+				t.Errorf("after storing %s: %+v, want %+v", data, got, want)
+			}
+		})
+	}
 }
