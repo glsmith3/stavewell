@@ -108,8 +108,18 @@ func ParseData(raw []byte) (Data, error) {
 // It stops at the first level too deep, so it never reaches the JSON
 // decoder's own nesting limit.
 func checkStructure(raw []byte) error {
-	dec := jsontext.NewDecoder(bytes.NewReader(raw),
-		jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	return checkStructureWith(jsontext.NewDecoder(bytes.NewReader(raw), structureOptions...))
+}
+
+// structureOptions are the decoder options checkStructure uses.
+var structureOptions = []jsontext.Options{
+	jsontext.AllowDuplicateNames(true),
+	jsontext.AllowInvalidUTF8(true),
+}
+
+// checkStructureWith is checkStructure, reading from dec, which must have
+// structureOptions.
+func checkStructureWith(dec *jsontext.Decoder) error {
 	tok, err := dec.ReadToken()
 	if err != nil {
 		return fmt.Errorf("%w (near byte %d)", ErrInvalidJSON, offset(err))
@@ -215,4 +225,81 @@ func Hash(f Fields) (string, error) {
 		return "", fmt.Errorf("record: hashing: %w", err)
 	}
 	return hashHex(v), nil
+}
+
+// Stored is a record as stored, with the hashes it claims.
+type Stored struct {
+	Ledger       string
+	Sequence     int64
+	CreatedAt    string // as stored, in the API's time format
+	Data         []byte // as stored
+	DataHash     string
+	PreviousHash string
+	Hash         string
+}
+
+// Verify reports whether r passes the checks of chain verification:
+//   - Its data is stored exactly as canonical JSON that follows the rules for
+//     record data, so it could have been appended as it is, and its
+//     data_hash is the hash of that JSON.
+//   - Its previous_hash is previous: the record hash of the record before
+//     it, or ZeroHash for record 1.
+//   - Its hash is the record hash of its other fields.
+//
+// Checking the stored bytes, not only their meaning, means that any change
+// to how a record's data is stored fails, even one that keeps its value,
+// such as added spaces or 2 rewritten as 2.0.
+func Verify(r Stored, previous string) bool {
+	var v Verifier
+	return v.Verify(r, previous)
+}
+
+// A Verifier runs Verify on one record after another, reusing its memory
+// for the canonical form of each record's data. The zero Verifier is ready
+// to use.
+type Verifier struct {
+	buf []byte
+	rd  bytes.Reader
+	dec *jsontext.Decoder
+}
+
+// canonicalOptions make jsontext.AppendFormat produce canonical JSON, as
+// Value.Canonicalize does.
+var canonicalOptions = []jsontext.Options{
+	jsontext.CanonicalizeRawInts(true),
+	jsontext.CanonicalizeRawFloats(true),
+	jsontext.ReorderRawObjects(true),
+}
+
+// Verify is the same as the Verify function. r.Data is only read, and
+// needn't stay valid after it returns.
+func (v *Verifier) Verify(r Stored, previous string) bool {
+	if len(r.Data) > MaxDataBytes {
+		return false
+	}
+	v.rd.Reset(r.Data)
+	if v.dec == nil {
+		v.dec = jsontext.NewDecoder(&v.rd, structureOptions...)
+	} else {
+		v.dec.Reset(&v.rd, structureOptions...)
+	}
+	if checkStructureWith(v.dec) != nil {
+		return false
+	}
+	var err error
+	v.buf, err = jsontext.AppendFormat(v.buf[:0], r.Data, canonicalOptions...)
+	if err != nil || !bytes.Equal(v.buf, r.Data) || hashHex(v.buf) != r.DataHash {
+		return false
+	}
+	if r.PreviousHash != previous {
+		return false
+	}
+	h, err := Hash(Fields{
+		Ledger:       r.Ledger,
+		Sequence:     r.Sequence,
+		CreatedAt:    r.CreatedAt,
+		DataHash:     r.DataHash,
+		PreviousHash: r.PreviousHash,
+	})
+	return err == nil && h == r.Hash
 }

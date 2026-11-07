@@ -38,6 +38,53 @@ type AppendRecordRequest struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// ChainVerification defines model for ChainVerification.
+type ChainVerification struct {
+	// Ledger 1 to 64 characters: lowercase letters, digits and hyphens, starting
+	// with a letter. Unique within your organization.
+	//
+	//
+	// Examples: orders
+	Ledger LedgerName `json:"ledger"`
+
+	// Intact Whether every record checked passed all three checks.
+	Intact bool `json:"intact"`
+
+	// FirstSequence The sequence number of the first record checked. It's `null` if
+	// there was nothing to check.
+	//
+	//
+	// Examples: 1
+	FirstSequence *int64 `json:"first_sequence"`
+
+	// LastSequence The sequence number of the last record checked. If the chain is
+	// broken, it's the record that failed. It's `null` if there was
+	// nothing to check.
+	//
+	//
+	// Examples: 2
+	LastSequence *int64 `json:"last_sequence"`
+
+	// LastHash The record hash of the last record checked. Save it outside
+	// Stavewell to check the chain later. It's `null` if the chain is
+	// broken or there was nothing to check.
+	//
+	//
+	// Examples: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
+	LastHash *string `json:"last_hash"`
+
+	// ReachedLatest Whether the check reached the ledger's latest record. If it's
+	// `false`, check the rest with `from` set to `last_sequence` plus 1.
+	ReachedLatest bool `json:"reached_latest"`
+
+	// BrokenSequence The sequence number of the first record that failed. It's `null`
+	// if the chain is intact.
+	//
+	//
+	// Examples: 2
+	BrokenSequence *int64 `json:"broken_sequence"`
+}
+
 // CreateLedgerRequest defines model for CreateLedgerRequest.
 type CreateLedgerRequest struct {
 	// Name 1 to 64 characters: lowercase letters, digits and hyphens, starting
@@ -256,6 +303,15 @@ type ListLedgersParams struct {
 	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
+// VerifyChainParams defines parameters for VerifyChain.
+type VerifyChainParams struct {
+	// From The sequence number to start at: from 1 to the ledger's latest
+	// sequence number plus 1. The default is 1. When `from` is more
+	// than 1, the check includes the link from that record to the one
+	// before it.
+	From *int64 `form:"from,omitempty" json:"from,omitempty"`
+}
+
 // ListRecordsParams defines parameters for ListRecords.
 type ListRecordsParams struct {
 	// Limit The most items to return, from 1 to 100. The default is 100.
@@ -293,6 +349,9 @@ type ServerInterface interface {
 	// GetLedger Get a ledger
 	// (GET /v1/ledgers/{name})
 	GetLedger(w http.ResponseWriter, r *http.Request, name LedgerNamePath)
+	// VerifyChain Run chain verification
+	// (GET /v1/ledgers/{name}/chain-verification)
+	VerifyChain(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params VerifyChainParams)
 	// ListRecords List records
 	// (GET /v1/ledgers/{name}/records)
 	ListRecords(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params ListRecordsParams)
@@ -407,6 +466,48 @@ func (siw *ServerInterfaceWrapper) GetLedger(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetLedger(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// VerifyChain operation middleware
+func (siw *ServerInterfaceWrapper) VerifyChain(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name LedgerNamePath
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params VerifyChainParams
+
+	// ------------- Optional query parameter "from" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "from"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "from", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.VerifyChain(w, r, name, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -698,6 +799,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}/records", wrapper.ListRecords)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/ledgers/{name}/records", wrapper.AppendRecord)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}/records/{sequence}", wrapper.GetRecord)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/ledgers/{name}/chain-verification", wrapper.VerifyChain)
 
 	return m
 }
@@ -1034,6 +1136,108 @@ type GetLedger500ApplicationProblemPlusJSONResponse struct {
 }
 
 func (response GetLedger500ApplicationProblemPlusJSONResponse) VisitGetLedgerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChainRequestObject struct {
+	Name   LedgerNamePath `json:"name"`
+	Params VerifyChainParams
+}
+
+type VerifyChainResponseObject interface {
+	VisitVerifyChainResponse(w http.ResponseWriter) error
+}
+
+type VerifyChain200JSONResponse ChainVerification
+
+func (response VerifyChain200JSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChain400ApplicationProblemPlusJSONResponse Problem
+
+func (response VerifyChain400ApplicationProblemPlusJSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChain401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyChain401ApplicationProblemPlusJSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.WWWAuthenticate != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprint(*response.Headers.WWWAuthenticate))
+	}
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChain403ApplicationProblemPlusJSONResponse struct {
+	InsufficientScopeApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyChain403ApplicationProblemPlusJSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChain404ApplicationProblemPlusJSONResponse Problem
+
+func (response VerifyChain404ApplicationProblemPlusJSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyChain500ApplicationProblemPlusJSONResponse struct {
+	InternalErrorApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyChain500ApplicationProblemPlusJSONResponse) VisitVerifyChainResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -1445,6 +1649,9 @@ type StrictServerInterface interface {
 	// GetLedger Get a ledger
 	// (GET /v1/ledgers/{name})
 	GetLedger(ctx context.Context, request GetLedgerRequestObject) (GetLedgerResponseObject, error)
+	// VerifyChain Run chain verification
+	// (GET /v1/ledgers/{name}/chain-verification)
+	VerifyChain(ctx context.Context, request VerifyChainRequestObject) (VerifyChainResponseObject, error)
 	// ListRecords List records
 	// (GET /v1/ledgers/{name}/records)
 	ListRecords(ctx context.Context, request ListRecordsRequestObject) (ListRecordsResponseObject, error)
@@ -1598,6 +1805,33 @@ func (sh *strictHandler) GetLedger(w http.ResponseWriter, r *http.Request, name 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetLedgerResponseObject); ok {
 		if err := validResponse.VisitGetLedgerResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// VerifyChain operation middleware
+func (sh *strictHandler) VerifyChain(w http.ResponseWriter, r *http.Request, name LedgerNamePath, params VerifyChainParams) {
+	var request VerifyChainRequestObject
+
+	request.Name = name
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.VerifyChain(ctx, request.(VerifyChainRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "VerifyChain")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(VerifyChainResponseObject); ok {
+		if err := validResponse.VisitVerifyChainResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

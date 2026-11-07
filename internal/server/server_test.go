@@ -52,6 +52,7 @@ func (l *lockedBuffer) String() string {
 // env is a server with its own database.
 type env struct {
 	db      *store.Store
+	path    string // the database file
 	handler http.Handler
 	srv     *httptest.Server
 	logs    *lockedBuffer
@@ -59,7 +60,8 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "stavewell.db"))
+	path := filepath.Join(t.TempDir(), "stavewell.db")
+	db, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,7 @@ func newEnv(t *testing.T) *env {
 	h := server.Handler(slog.New(slog.NewJSONHandler(logs, nil)), db)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &env{db: db, handler: h, srv: srv, logs: logs}
+	return &env{db: db, path: path, handler: h, srv: srv, logs: logs}
 }
 
 // newOrg creates an organization and returns its public ID.
@@ -213,6 +215,11 @@ func specCases() []specCase {
 		appendRecord(t, e, key, "orders", `{"order_id":"A-1001","amount":"12.50","quantity":2}`)
 		return key
 	}
+	withBrokenRecord := func(t *testing.T, e *env) string {
+		key := withRecord(t, e)
+		tamperDB(t, e, `UPDATE records SET data = '{"order_id":"A-9999"}' WHERE sequence = 1`)
+		return key
+	}
 	keyed := map[string]string{"Idempotency-Key": "order-A-1001"}
 	withKeyedRecord := func(t *testing.T, e *env) string {
 		key := withOrders(t, e)
@@ -273,6 +280,15 @@ func specCases() []specCase {
 		{"repeat an append with an idempotency key", withKeyedRecord, "POST", "/v1/ledgers/orders/records", order, 200, "", keyed},
 		{"reuse an idempotency key with different data", withKeyedRecord, "POST", "/v1/ledgers/orders/records", `{"data":{"order_id":"A-1002"}}`, 422, "idempotency-key-reused", keyed},
 		{"append with an invalid idempotency key", withOrders, "POST", "/v1/ledgers/orders/records", order, 400, "invalid-request", map[string]string{"Idempotency-Key": "not valid"}},
+
+		{"verify", withRecord, "GET", "/v1/ledgers/orders/chain-verification", "", 200, "", nil},
+		{"verify an empty ledger", withOrders, "GET", "/v1/ledgers/orders/chain-verification", "", 200, "", nil},
+		{"verify a broken chain", withBrokenRecord, "GET", "/v1/ledgers/orders/chain-verification", "", 200, "", nil},
+		{"verify from 0", withRecord, "GET", "/v1/ledgers/orders/chain-verification?from=0", "", 400, "invalid-request", nil},
+		{"verify from past the end", withRecord, "GET", "/v1/ledgers/orders/chain-verification?from=3", "", 400, "invalid-request", nil},
+		{"verify without a key", none, "GET", "/v1/ledgers/orders/chain-verification", "", 401, "unauthorized", nil},
+		{"verify with a write-only key", ordersWriteOnly, "GET", "/v1/ledgers/orders/chain-verification", "", 403, "insufficient-scope", nil},
+		{"verify a missing ledger", full, "GET", "/v1/ledgers/missing/chain-verification", "", 404, "ledger-not-found", nil},
 	}
 }
 

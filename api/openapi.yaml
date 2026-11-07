@@ -135,6 +135,41 @@ info:
     in another ledger is a separate append. Keys aren't part of the record
     or its record hash, and reading records doesn't return them. An append
     without the header always appends a new record.
+
+    ## Chain verification
+
+    Chain verification recomputes a ledger's chain to confirm that no record
+    was altered. For each record, it checks three things:
+
+    - `data` is stored exactly as canonical JSON that follows the rules in
+      "Record data", and `data_hash` is its hash. So any change to how a
+      record's data is stored is found, even one that keeps its value, such
+      as `2` rewritten as `2.0`.
+    - `hash` is the record hash of the record's other fields.
+    - `previous_hash` is the record hash of the record numbered one less,
+      or 64 zeros for record 1.
+
+    A request checks up to 10,000 records. If `reached_latest` is `false`,
+    check the rest with `from` set to `last_sequence` plus 1. A broken
+    chain isn't an error: the response is still 200, with `intact` set to
+    `false`. Checking stops at the first record that fails.
+
+    What it proves:
+
+    - **It catches** a record changed in the database without every later
+      record hash being recomputed: for example, by disk corruption, a
+      faulty migration or someone editing the database file.
+    - **It can't catch** someone with full control of the server who
+      changes a record and then recomputes every record hash after it.
+      Chain verification would report that chain as intact. It also can't
+      catch records removed from the end of a ledger, or records moved to a
+      ledger with the same name in another organization.
+    - **To protect against these,** save `last_sequence` and `last_hash`
+      from a response somewhere outside Stavewell. Later, confirm that the
+      record with that sequence number still has that record hash, and
+      that chain verification still reports the chain as intact. You can
+      also run chain verification yourself, from the records, using the
+      rules in "Record hashes".
 servers:
   - url: http://127.0.0.1:8080
     description: Local development server
@@ -149,6 +184,9 @@ tags:
     description: |
       Records in your organization's ledgers. A record never changes after
       it's written.
+  - name: Chain verification
+    description: |
+      Checking that no record in a ledger was altered.
 paths:
   /health:
     get:
@@ -571,6 +609,84 @@ paths:
                 $ref: "#/components/schemas/Problem"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/ledgers/{name}/chain-verification:
+    parameters:
+      - $ref: "#/components/parameters/LedgerNamePath"
+    get:
+      operationId: verifyChain
+      tags: [Chain verification]
+      summary: Run chain verification
+      description: |
+        Checks up to 10,000 of a ledger's records, starting at record 1 or at
+        `from`. See "Chain verification" in the API description.
+      security:
+        - apiKey: [ledger:read]
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: |
+            The sequence number to start at: from 1 to the ledger's latest
+            sequence number plus 1. The default is 1. When `from` is more
+            than 1, the check includes the link from that record to the one
+            before it.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: |
+            The check ran. `intact` says whether the records checked passed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChainVerification"
+              examples:
+                intact:
+                  summary: An intact chain
+                  value:
+                    ledger: orders
+                    intact: true
+                    first_sequence: 1
+                    last_sequence: 2
+                    last_hash: 1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce
+                    reached_latest: true
+                    broken_sequence: null
+                broken:
+                  summary: A broken chain
+                  value:
+                    ledger: orders
+                    intact: false
+                    first_sequence: 1
+                    last_sequence: 2
+                    last_hash: null
+                    reached_latest: true
+                    broken_sequence: 2
+        "400":
+          description: |
+            `from` isn't a whole number from 1 up, or it's more than one past
+            the ledger's latest sequence number. The error type is
+            `invalid-request`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: |
+            Your organization has no ledger with this name. The error type is
+            `ledger-not-found`. A ledger in another organization gets the same
+            error.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     apiKey:
@@ -858,6 +974,61 @@ components:
           type: boolean
           description: |
             Whether more records existed after this page when the request ran.
+    ChainVerification:
+      type: object
+      additionalProperties: false
+      required: [ledger, intact, first_sequence, last_sequence, last_hash, reached_latest, broken_sequence]
+      properties:
+        ledger:
+          x-order: 1
+          $ref: "#/components/schemas/LedgerName"
+        intact:
+          x-order: 2
+          type: boolean
+          description: Whether every record checked passed all three checks.
+        first_sequence:
+          x-order: 3
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+          description: |
+            The sequence number of the first record checked. It's `null` if
+            there was nothing to check.
+          examples: [1]
+        last_sequence:
+          x-order: 4
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+          description: |
+            The sequence number of the last record checked. If the chain is
+            broken, it's the record that failed. It's `null` if there was
+            nothing to check.
+          examples: [2]
+        last_hash:
+          x-order: 5
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            The record hash of the last record checked. Save it outside
+            Stavewell to check the chain later. It's `null` if the chain is
+            broken or there was nothing to check.
+          examples: [1c868d7341149b79eab7851840f1acd2c13f91997e465944d5d10b16154075ce]
+        reached_latest:
+          x-order: 6
+          type: boolean
+          description: |
+            Whether the check reached the ledger's latest record. If it's
+            `false`, check the rest with `from` set to `last_sequence` plus 1.
+        broken_sequence:
+          x-order: 7
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+          description: |
+            The sequence number of the first record that failed. It's `null`
+            if the chain is intact.
+          examples: [2]
     Health:
       type: object
       additionalProperties: false
