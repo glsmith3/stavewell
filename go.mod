@@ -11,7 +11,7 @@ tool (
 require (
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/oapi-codegen/runtime v1.8.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
